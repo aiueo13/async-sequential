@@ -33,10 +33,9 @@ async fn some_async_function() {
 ```
 
 # License
-
 Licensed under either of
 
-* Apache License, Version 2.0
-* MIT License
+ * MIT license
+ * Apache License (Version 2.0)
 
 at your option.
