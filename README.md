@@ -1,6 +1,10 @@
+Note: **I’m using a translation tool, so some expressions may be awkward or inaccurate.**
+
+# Overview
+
 Provides an executor for running asynchronous and blocking tasks sequentially on shared mutable state.
 
-This crate only supports the `tokio` async runtime.
+This crate requires the `tokio` async runtime.
 
 # Usage
 
@@ -33,6 +37,7 @@ async fn some_async_function() {
 ```
 
 # License
+
 Licensed under either of
 
  * MIT license
