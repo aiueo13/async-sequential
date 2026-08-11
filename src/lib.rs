@@ -272,7 +272,7 @@ impl<S: Send + 'static> StatefulExecutor<S> {
     /// Waits for all queued tasks to complete and returns the final state.
     ///
     /// # Panics
-    /// Panics if a executed task panicked.
+    /// Panics if any task panicked.
     /// 
     /// # Example
     /// ```
