@@ -107,8 +107,8 @@ impl<S: Send + 'static> StatefulExecutor<S> {
     /// Tasks are executed sequentially in the order they are queued, regardless of whether they are asynchronous or blocking.
     /// While the task is running, it has exclusive mutable access to the executor's state.
     ///
-    /// The blocking task is executed on a blocking thread 
-    /// so that it does not block the asynchronous runtime.
+    /// The blocking task is executed on a blocking thread
+    /// to avoid blocking the asynchronous runtime.
     /// 
     /// # Panics
     /// Panics if the task panics or if a previous task panicked.
@@ -215,8 +215,8 @@ impl<S: Send + 'static> StatefulExecutor<S> {
     /// Tasks are executed sequentially in the order they are queued, regardless of whether they are asynchronous or blocking.
     /// While the task is running, it has exclusive mutable access to the executor's state.
     /// 
-    /// The blocking task is executed on a blocking thread 
-    /// so that it does not block the asynchronous runtime.
+    /// The blocking task is executed on a blocking thread
+    /// to avoid blocking the asynchronous runtime.
     /// 
     /// # Panics
     /// Panics when the [`TaskHandle`] is awaited if the task panics or if a previous task panicked.
