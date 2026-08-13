@@ -12,27 +12,32 @@ This crate requires the `tokio` async runtime.
 async fn example() {
     let executor = async_sequential::StatefulExecutor::new(Vec::new());
 
-    executor.execute_blocking(move |state: &mut Vec<u64>| {
-        state.push(0);
-    }).await;
+    executor.submit(move |state: &mut Vec<u64>| Box::pin(async move {
+        state.push(identity(0).await);
+    }));
 
-    executor.execute(move |state: &mut Vec<u64>| Box::pin(async move {
-        some_async_function().await;
+    executor.submit_blocking(move |state: &mut Vec<u64>| {
         state.push(1);
-    })).await;
+    });
 
     let task_result = executor.execute(move |state: &mut Vec<u64>| Box::pin(async move {
-        state.push(2);
+        state.push(identity(2).await);
         "hello"
     })).await;
     assert_eq!(task_result, "hello");
 
+    let task_result = executor.execute_blocking(move |state: &mut Vec<u64>| {
+        state.push(3);
+        "world"
+    }).await;
+    assert_eq!(task_result, "world");
+
     let result = executor.join().await;
-    assert_eq!(result, vec![0, 1, 2]);
+    assert_eq!(result, vec![0, 1, 2, 3]);
 }
 
-async fn some_async_function() {
-
+async fn identity(v: u64) -> u64 {
+    v
 }
 ```
 

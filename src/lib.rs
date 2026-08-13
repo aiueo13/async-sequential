@@ -1,4 +1,3 @@
-use std::sync::Arc;
 use std::pin::Pin;
 use std::future::Future;
 use tokio::{task::{spawn, spawn_blocking}, sync::{oneshot, mpsc}};
@@ -25,20 +24,17 @@ use tokio::{task::{spawn, spawn_blocking}, sync::{oneshot, mpsc}};
 /// # }
 /// ```
 pub struct StatefulExecutor<S> {
-    executor: Arc<std::sync::Mutex<ExecutorState<S>>>,
+    executor: std::sync::Mutex<Option<ExecutorState<S>>>,
 }
 
 enum ExecutorState<S> {
+    Idle {
+        state: S,
+    },
     Running {
-        tx: mpsc::UnboundedSender<Task<S>>,
-        done_rx: Option<oneshot::Receiver<()>>
+        task_tx: mpsc::UnboundedSender<Task<S>>,
+        join_rx: oneshot::Receiver<S>
     },
-    Pending {
-        tx: mpsc::UnboundedSender<Task<S>>,
-        rx: mpsc::UnboundedReceiver<Task<S>>,
-        state: S
-    },
-    Closed,
 }
 
 impl<S> StatefulExecutor<S> {
@@ -48,11 +44,8 @@ impl<S> StatefulExecutor<S> {
     /// The state is owned by the executor
     /// and is made available to tasks through exclusive mutable access.
     pub fn new(state: S) -> Self {
-        let (tx, rx) = mpsc::unbounded_channel::<Task<S>>();
         Self {
-            executor: Arc::new(std::sync::Mutex::new(ExecutorState::Pending { 
-                rx, 
-                tx, 
+            executor: std::sync::Mutex::new(Some(ExecutorState::Idle { 
                 state
             })),
         }
@@ -293,15 +286,18 @@ impl<S: Send + 'static> StatefulExecutor<S> {
     /// # }
     /// ```
     pub async fn join(self) -> S {
-        {  
-            let mut locked_executor = self.executor.lock().unwrap();
-            let is_pending = match *locked_executor {
-                ExecutorState::Pending { .. } => true,
-                _ => false
+        {
+            let mut locked_executor = self.executor.lock().expect("any task has been panicked");
+            let executor = locked_executor.as_mut().expect("illegal closed executor");
+
+            let is_pending = match *executor {
+                ExecutorState::Idle { .. } => true,
+                _ => false,
             };
+
             if is_pending {
-                return match std::mem::replace(&mut *locked_executor, ExecutorState::Closed) {
-                    ExecutorState::Pending { state, .. } => state,
+                return match std::mem::replace(&mut *locked_executor, None) {
+                    Some(ExecutorState::Idle { state }) => state,
                     _ => unreachable!()
                 }
             }
@@ -309,75 +305,66 @@ impl<S: Send + 'static> StatefulExecutor<S> {
 
         self.execute(|_| Box::pin(async {})).await;
 
-        let done_rx = match &mut *self.executor.lock().unwrap() {
-            ExecutorState::Pending { .. } => None,
-            ExecutorState::Running { done_rx, .. } => { done_rx.take() },
-            ExecutorState::Closed => None,
-        };
+        let executor = std::mem::replace(
+            &mut *self.executor.lock().expect("any task has been panicked"), 
+            None
+        );
 
-        if let Some(done_rx) = done_rx {
-            let _ = done_rx.await;
-        }
-
-        match std::mem::replace(&mut *self.executor.lock().unwrap(), ExecutorState::Closed) {
-            ExecutorState::Pending { state, .. } => state,
-            ExecutorState::Running { .. } => panic!("worker is still running"),
-            ExecutorState::Closed => panic!("executor has already been closed"),
+        match executor {
+            Some(ExecutorState::Running { join_rx, task_tx }) => {
+                drop(task_tx);
+                join_rx.await.expect("any task has been panicked")
+            },
+            _ => unreachable!(),
         }
     }
 
     fn submit_inner(&self, task: Task<S>) {
-        let tx = match *self.executor.lock().unwrap() {
-            ExecutorState::Closed => panic!("illegal closed state"),
-            ExecutorState::Running { ref tx, .. } => tx.clone(),
-            ExecutorState::Pending { ref tx, .. } => tx.clone(),
+        let mut locked_executor = self.executor.lock().expect("any task has been panicked");
+        let executor = locked_executor.as_mut().expect("illegal closed executor");
+
+        match *executor {
+            ExecutorState::Running { ref task_tx, .. } => {
+                task_tx.send(task).expect("any task has been panicked");
+                return;
+            },
+            _ => {}
         };
 
-        tx.send(task).expect("rx has been shut down");
+        let (join_tx, join_rx) = oneshot::channel();
+        let (task_tx, mut task_rx) = mpsc::unbounded_channel::<Task<S>>();
 
-        let (done_tx, done_rx) = oneshot::channel();
-        let (tx, mut rx, mut state) = match std::mem::replace(
-            &mut *self.executor.lock().unwrap(), 
-            ExecutorState::Running { tx, done_rx: Some(done_rx) }
+        task_tx.send(task).expect("illegal closed task_rx");
+
+        let mut state = match std::mem::replace(
+            &mut *executor,
+            ExecutorState::Running { task_tx, join_rx }
         ) {
-            ExecutorState::Closed => panic!("illegal closed state"),
-            ExecutorState::Running { .. } => return,
-            ExecutorState::Pending { tx, rx, state } => (tx, rx, state),
+            ExecutorState::Idle { state } => state,
+            ExecutorState::Running { .. } => unreachable!("illegal running state"),
         };
-
-        let executor = Arc::clone(&self.executor);
+        
         spawn(async move {
-            let mut job = rx.recv().await.unwrap();
-           
-            loop {
-                match job {
-                    Task::Blocking(job) => {
+            while let Some(task) = task_rx.recv().await {
+                match task {
+                    Task::Blocking(task) => {
                         state = spawn_blocking(move || {
-                            job(&mut state);
+                            task(&mut state);
                             state
                         }).await.expect("blocking task unexpectedly failed");
                     },
-                    Task::Async(job) => job(&mut state).await,
-                }
-
-                let mut locked_executor = executor.lock().unwrap();
-                if let Ok(next_f) = rx.try_recv() {
-                    job = next_f;
-                }
-                else {
-                    *locked_executor = ExecutorState::Pending { tx, rx, state };
-                    break;
+                    Task::Async(task) => task(&mut state).await,
                 }
             }
 
-            let _ = done_tx.send(());
+            let _ = join_tx.send(state);
         });
     }
 }
 
 enum Task<S> {
-    Blocking(Box<dyn FnOnce(&mut S) + Send>),
-    Async(Box<dyn for<'a> FnOnce(&'a mut S) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> + Send>),
+    Blocking(Box<dyn (FnOnce(&mut S) -> ()) + Send>),
+    Async(Box<dyn (for<'a> FnOnce(&'a mut S) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>>) + Send>),
 }
 
 pub struct TaskHandle<R> {
@@ -404,6 +391,7 @@ impl<R> Future for TaskHandle<R> {
 #[cfg(test)]
 mod test {
     use super::*;
+    use std::sync::Arc;
 
 
     #[tokio::test]
