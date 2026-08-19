@@ -61,6 +61,13 @@ impl<S> Executor<S> {
     }
 }
 
+impl<S: Default> Default for Executor<S> {
+
+    fn default() -> Self {
+        Self::new(S::default())
+    }
+}
+
 impl<S: Send + 'static> Executor<S> {
 
     /// Queues an asynchronous task for sequential execution, 
@@ -205,89 +212,61 @@ impl<S: Send + 'static> Executor<S> {
     /// # }
     /// ```
     pub async fn join(self) -> S {
-        {
-            let mut locked_executor = self.executor.lock().expect("any task has been panicked");
-            let executor = locked_executor.as_mut().expect("illegal closed executor");
-            if matches!(*executor, ExecutorState::Idle { .. }) {
-                return match std::mem::replace(&mut *locked_executor, None) {
-                    Some(ExecutorState::Idle { state }) => state,
-                    _ => unreachable!()
-                }
-            }
-        }
-
-        self.spawn(|_| Box::pin(async {})).await;
-
-        let executor = std::mem::replace(
-            &mut *self.executor.lock().expect("any task has been panicked"), 
-            None
-        );
-
-        match executor {
+        match self.executor.lock().expect("any task has been panicked").take() {
+            Some(ExecutorState::Idle { state }) => state,
             Some(ExecutorState::Running { handle, task_tx }) => {
                 drop(task_tx);
                 handle.await.expect("any task has been panicked")
-            },
-            _ => unreachable!(),
+            }
+            None => unreachable!("illegal closed executor"),
         }
     }
 
     fn spawn_inner(&self, task: Task<S>) {
         let mut locked_executor = self.executor.lock().expect("any task has been panicked");
-        if locked_executor.is_none() {
-            unreachable!("illegal closed executor")
+
+        if let Some(ExecutorState::Running { ref task_tx, .. }) = *locked_executor {
+            task_tx.send(task).expect("any task has been panicked");
+            return;
         }
 
-        match *locked_executor {
-            Some(ExecutorState::Running { ref task_tx, .. }) => {
-                task_tx.send(task).expect("any task has been panicked");
-                return;
-            },
-            _ => {}
-        };
+        *locked_executor = {
+            let Some(ExecutorState::Idle { mut state }) = locked_executor.take() else {
+                unreachable!("illegal closed executor")
+            };
 
-        let (task_tx, mut task_rx) = mpsc::unbounded_channel::<Task<S>>();
+            let (task_tx, mut task_rx) = mpsc::unbounded_channel::<Task<S>>();
+            task_tx.send(task).expect("illegal closed task_rx");
 
-        task_tx.send(task).expect("illegal closed task_rx");
-
-        let mut state = match std::mem::replace(
-            &mut *locked_executor,
-            None,
-        ) {
-            Some(ExecutorState::Idle { state }) => state,
-            _ => unreachable!(),
-        };
-        
-        let handle = spawn(async move {
-            while let Some(task) = task_rx.recv().await {
-                match task {
-                    Task::Blocking(task) => {
-                        state = spawn_blocking(move || {
-                            task(&mut state);
-                            state
-                        }).await.expect("blocking task unexpectedly failed");
-                    },
-                    Task::Async(task) => task(&mut state).await,
+            let handle = spawn(async move {
+                while let Some(task) = task_rx.recv().await {
+                    match task {
+                        Task::Blocking(task) => {
+                            state = spawn_blocking(move || {
+                                task(&mut state);
+                                state
+                            }).await.expect("blocking task unexpectedly failed");
+                        },
+                        Task::Async(task) => task(&mut state).await,
+                    }
                 }
-            }
-
-            state
-        });
-
-        *locked_executor = Some(ExecutorState::Running { task_tx, handle });
+                state
+            });
+            
+            Some(ExecutorState::Running { task_tx, handle })
+        };
     }
 }
 
 impl<S> Drop for Executor<S> {
 
     fn drop(&mut self) {
-        if let Some(executor) = self.executor.lock().ok().and_then(|mut e| e.take()) {
-            match executor {
-                ExecutorState::Idle { .. } => {},
-                ExecutorState::Running { handle, .. } => {
-                    handle.abort();
-                },
-            }
+        match self.executor.lock().ok().and_then(|mut e| e.take()) {
+            Some(ExecutorState::Idle { .. }) => {},
+            Some(ExecutorState::Running { handle, .. }) => {
+                handle.abort();
+            },
+            None => {}
         }
     }
 }
@@ -685,5 +664,21 @@ mod test {
         let result = executor.join().await;
 
         assert_eq!(result, (0..1000).collect::<Vec<_>>());
+    }
+
+    #[tokio::test]
+    async fn test22() {
+        let se = Executor::new(0);
+        let c = 4;
+
+        for _ in 0..c {
+            se.spawn(|s| Box::pin(async {
+                *s += 1;
+                tokio::time::sleep(std::time::Duration::from_secs(1))
+            }));  
+        }
+
+        let result = se.join().await;
+        assert_eq!(result, c)
     }
 }

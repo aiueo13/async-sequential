@@ -1,6 +1,6 @@
 [package]
 name = "async-sequential"
-version = "0.2.1"
+version = "0.2.2"
 edition = "2024"
 authors = ["OkaYu"]
 license = "MIT OR Apache-2.0"
@@ -13,5 +13,5 @@ readme = "README.md"
 tokio = { version = "1", features = ["sync", "rt"] }
 
 [dev-dependencies]
-tokio = { version = "1", features = ["sync", "rt", "macros"] }
+tokio = { version = "1", features = ["sync", "rt", "macros", "time"] }
 tokio-test = "0.4"
