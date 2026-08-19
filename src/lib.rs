@@ -43,7 +43,7 @@ impl<S> StatefulExecutor<S> {
     ///
     /// The state is owned by the executor
     /// and is made available to tasks through exclusive mutable access.
-    pub fn new(state: S) -> Self {
+    pub const fn new(state: S) -> Self {
         Self {
             executor: std::sync::Mutex::new(Some(ExecutorState::Idle { 
                 state
@@ -289,13 +289,7 @@ impl<S: Send + 'static> StatefulExecutor<S> {
         {
             let mut locked_executor = self.executor.lock().expect("any task has been panicked");
             let executor = locked_executor.as_mut().expect("illegal closed executor");
-
-            let is_pending = match *executor {
-                ExecutorState::Idle { .. } => true,
-                _ => false,
-            };
-
-            if is_pending {
+            if matches!(*executor, ExecutorState::Idle { .. }) {
                 return match std::mem::replace(&mut *locked_executor, None) {
                     Some(ExecutorState::Idle { state }) => state,
                     _ => unreachable!()
