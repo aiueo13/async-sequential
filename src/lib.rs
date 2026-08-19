@@ -118,13 +118,9 @@ impl<S: Send + 'static> Executor<S> {
         R: Send + 'static,
     {
         let (tx, rx) = oneshot::channel();
-        let task = Task::Async(Box::new(|s: &mut S| 
-            Box::pin(async {
-                let res = task(s).await;
-                let _ = tx.send(res);
-            })
-        ));
-        self.spawn_inner(task);
+        self.submit(Task::Async(Box::new(|s: &mut S| Box::pin(async {
+            let _ = tx.send(task(s).await);
+        }))));
         TaskHandle { rx }
     }
 
@@ -179,11 +175,9 @@ impl<S: Send + 'static> Executor<S> {
         R: Send + 'static,
     {
         let (tx, rx) = oneshot::channel();
-        let task = Task::Blocking(Box::new(move |s: &mut S| {
-            let res = task(s);
-            let _ = tx.send(res);
-        }));
-        self.spawn_inner(task);
+        self.submit(Task::Blocking(Box::new(move |s: &mut S| {
+            let _ = tx.send(task(s));
+        })));
         TaskHandle { rx }
     }
 
@@ -222,7 +216,7 @@ impl<S: Send + 'static> Executor<S> {
         }
     }
 
-    fn spawn_inner(&self, task: Task<S>) {
+    fn submit(&self, task: Task<S>) {
         let mut locked_executor = self.executor.lock().expect("any task has been panicked");
 
         if let Some(ExecutorState::Running { ref task_tx, .. }) = *locked_executor {
@@ -252,7 +246,7 @@ impl<S: Send + 'static> Executor<S> {
                 }
                 state
             });
-            
+
             Some(ExecutorState::Running { task_tx, handle })
         };
     }
