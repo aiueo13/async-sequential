@@ -1,10 +1,10 @@
 [package]
 name = "async-sequential"
-version = "0.1.2"
+version = "0.2.0"
 edition = "2024"
 authors = ["OkaYu"]
 license = "MIT OR Apache-2.0"
-description = "An async executor for running tasks sequentially on shared mutable state."
+description = "Running tasks sequentially on shared mutable state."
 keywords = ["async", "executor", "sequential", "state", "tokio"]
 repository = "https://github.com/aiueo13/async-sequential"
 readme = "README.md"

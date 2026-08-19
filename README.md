@@ -10,30 +10,24 @@ This crate requires the `tokio` async runtime.
 
 ```rust
 async fn example() {
-    let executor = async_sequential::StatefulExecutor::new(Vec::new());
+    let executor = async_sequential::Executor::new(Vec::new());
 
-    executor.submit(move |state: &mut Vec<u64>| Box::pin(async move {
+    executor.spawn(move |state: &mut Vec<u64>| Box::pin(async move {
         state.push(identity(0).await);
     }));
 
-    executor.submit_blocking(move |state: &mut Vec<u64>| {
+    executor.spawn_blocking(move |state: &mut Vec<u64>| {
         state.push(1);
     });
 
-    let task_result = executor.execute(move |state: &mut Vec<u64>| Box::pin(async move {
+    let task_result = executor.spawn(move |state: &mut Vec<u64>| Box::pin(async move {
         state.push(identity(2).await);
-        "hello"
+        "hello world"
     })).await;
-    assert_eq!(task_result, "hello");
-
-    let task_result = executor.execute_blocking(move |state: &mut Vec<u64>| {
-        state.push(3);
-        "world"
-    }).await;
-    assert_eq!(task_result, "world");
+    assert_eq!(task_result, "hello world");
 
     let result = executor.join().await;
-    assert_eq!(result, vec![0, 1, 2, 3]);
+    assert_eq!(result, vec![0, 1, 2]);
 }
 
 async fn identity(v: u64) -> u64 {
