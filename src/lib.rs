@@ -75,8 +75,11 @@ impl<S: Send + 'static> Executor<S> {
     /// Blocking tasks that have already started may continue running to completion.
     /// 
     /// # Panics
-    /// Panics when the [`TaskHandle`] is awaited if the task panics or if a previous task panicked.
-    ///
+    /// Awaiting the [`TaskHandle`] panics in the following cases:
+    /// - The task panics.
+    /// - A previous task panicked.
+    /// - The [`Executor`] is dropped.
+    /// 
     /// # Example
     /// ```
     /// # fn main() {
@@ -133,8 +136,11 @@ impl<S: Send + 'static> Executor<S> {
     /// Blocking tasks that have already started may continue running to completion.
     /// 
     /// # Panics
-    /// Panics when the [`TaskHandle`] is awaited if the task panics or if a previous task panicked.
-    ///
+    /// Awaiting the [`TaskHandle`] panics in the following cases:
+    /// - The task panics.
+    /// - A previous task panicked.
+    /// - The [`Executor`] is dropped.
+    /// 
     /// # Example
     /// ```
     /// # fn main() {
