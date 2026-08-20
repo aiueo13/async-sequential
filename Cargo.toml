@@ -13,5 +13,22 @@ readme = "README.md"
 tokio = { version = "1", features = ["sync", "rt"] }
 
 [dev-dependencies]
-tokio = { version = "1", features = ["sync", "rt", "macros", "time"] }
+tokio = { version = "1", features = ["sync", "rt", "macros", "time", "rt-multi-thread"] }
 tokio-test = "0.4"
+criterion = "0.8"
+
+[[bench]]
+name = "async_task_on_multi_thread_runtime"
+harness = false
+
+[[bench]]
+name = "async_task_on_single_thread_runtime"
+harness = false
+
+[[bench]]
+name = "blocking_task_on_multi_thread_runtime"
+harness = false
+
+[[bench]]
+name = "blocking_task_on_single_thread_runtime"
+harness = false
