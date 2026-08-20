@@ -7,7 +7,16 @@ use tokio::{task::{spawn, spawn_blocking, JoinHandle as SpawnJoinHandle}, sync::
 
 /// Executor for running asynchronous and blocking tasks sequentially on a shared mutable state.
 /// 
-/// When a [`Executor`] is dropped, all tasks in the executor are immediately aborted.
+/// Tasks are executed sequentially in the order they are queued,
+/// regardless of whether they are asynchronous or blocking.
+/// 
+/// If a task panics, subsequent tasks also panic because the state invariants
+/// may have been violated by the task's panic.
+/// 
+/// When the executor is dropped, all tasks in the executor are immediately aborted.
+/// Note blocking tasks are not asynchronous, so if one is already running,
+/// aborting it only detaches it from a [`TaskHandle`],
+/// and it continues running while holding the state.
 /// 
 /// # Examples
 /// ```
@@ -86,7 +95,8 @@ impl<S: Send + 'static> Executor<S> {
     /// Queues an asynchronous task for sequential execution and waits for it to complete.
     /// 
     /// The task is executed after all previously queued tasks have completed.
-    /// Tasks are executed sequentially in the order they are queued, regardless of whether they are asynchronous or blocking.
+    /// Tasks are executed sequentially in the order they are queued,
+    /// regardless of whether they are asynchronous or blocking.
     /// 
     /// # Panics
     /// Panics if the task or any previous task panicked,
@@ -115,7 +125,8 @@ impl<S: Send + 'static> Executor<S> {
     /// Queues a blocking task for sequential execution and waits for it to complete.
     /// 
     /// The task is executed after all previously queued tasks have completed.
-    /// Tasks are executed sequentially in the order they are queued, regardless of whether they are asynchronous or blocking.
+    /// Tasks are executed sequentially in the order they are queued,
+    /// regardless of whether they are asynchronous or blocking.
     /// 
     /// The blocking task is executed using blocking thread pool
     /// to avoid blocking the asynchronous runtime.
@@ -148,7 +159,8 @@ impl<S: Send + 'static> Executor<S> {
     /// returning a [`TaskHandle`] to wait for it to complete.
     /// 
     /// The task is executed after all previously queued tasks have completed.
-    /// Tasks are executed sequentially in the order they are queued, regardless of whether they are asynchronous or blocking.
+    /// Tasks are executed sequentially in the order they are queued,
+    /// regardless of whether they are asynchronous or blocking.
     /// 
     /// When a [`Executor`] is dropped, all tasks in the executor are immediately aborted.
     /// 
@@ -188,12 +200,16 @@ impl<S: Send + 'static> Executor<S> {
     /// returning a [`TaskHandle`] to wait for it to complete.
     ///
     /// The task is executed after all previously queued tasks have completed.
-    /// Tasks are executed sequentially in the order they are queued, regardless of whether they are asynchronous or blocking.
+    /// Tasks are executed sequentially in the order they are queued,
+    /// regardless of whether they are asynchronous or blocking.
     /// 
     /// The blocking task is executed using blocking thread pool
     /// to avoid blocking the asynchronous runtime.
     /// 
     /// When a [`Executor`] is dropped, all tasks in the executor are immediately aborted.
+    /// Note blocking tasks are not asynchronous, so if one is already running,
+    /// aborting it only detaches it from the [`TaskHandle`],
+    /// and it continues running while holding the state.
     /// 
     /// # Panics
     /// Panics if this method is called outside Tokio runtime.
@@ -415,13 +431,23 @@ impl TaskError {
     /// # tokio_test::block_on(async {
     /// let executor = async_sequential::Executor::new(());
     /// 
-    /// let handle = executor.spawn(move |_| Box::pin(async move {
+    /// let handle1 = executor.spawn(move |_| Box::pin(async move {
     ///     panic!()
     /// }));
+    /// let handle2 = executor.spawn(move |_| Box::pin(async move {
+    ///     
+    /// }));
     /// 
-    /// let err = handle.await.unwrap_err();
-    /// assert!(err.is_panic());
-    /// assert!(!err.is_cancelled());
+    /// let err1 = handle1.await.unwrap_err();
+    /// assert!(err1.is_panic());
+    /// assert!(!err1.is_cancelled());
+    /// 
+    /// // Subsequent tasks also panic
+    /// // because the state invariants may have been violated
+    /// // by the preceding task's panic.
+    /// let err2 = handle2.await.unwrap_err();
+    /// assert!(err2.is_panic());
+    /// assert!(!err2.is_cancelled());
     /// # });
     /// # }
     /// ```
