@@ -1,41 +1,56 @@
 use std::pin::Pin;
 use std::future::Future;
-use std::sync::Mutex as SyncMutex;
+use std::sync::{Arc, Mutex as SyncMutex, OnceLock, atomic::{AtomicBool, Ordering}};
+use std::fmt;
 use tokio::{task::{spawn, spawn_blocking, JoinHandle as SpawnJoinHandle}, sync::{oneshot, mpsc}};
 
 
 /// Executor for running asynchronous and blocking tasks sequentially on a shared mutable state.
 /// 
-/// When the [`Executor`] is dropped, all queued tasks and running asynchronous tasks are aborted.
-/// Blocking tasks that have already started may continue running to completion.
+/// When the [`Executor`] is dropped,
+/// all queued tasks and running asynchronous tasks are immediately aborted.
+/// Blocking tasks that have already started cannot be aborted because they are not async
+/// and continue running normally.
 /// 
-/// # Example
+/// # Examples
 /// ```
 /// # fn main() {
 /// # tokio_test::block_on(async {
-/// let executor = async_sequential::Executor::new(Vec::<&str>::new());
-///
-/// executor.spawn(move |state| Box::pin(async move {
-///     state.push("first");
+/// let executor = async_sequential::Executor::new(Vec::new());
+/// 
+/// executor.spawn(move |state: &mut Vec<u64>| Box::pin(async move {
+///     state.push(identity(0).await);
 /// }));
 /// 
-/// executor.spawn_blocking(move |state| {
-///     state.push("second");
+/// executor.spawn_blocking(move |state: &mut Vec<u64>| {
+///     state.push(1);
 /// });
 /// 
-/// let task_result = executor.spawn(move |state| Box::pin(async move {
-///     state.push("third");
-///     "hello world"
+/// let task_result = executor.execute(move |state: &mut Vec<u64>| Box::pin(async move {
+///     state.push(identity(2).await);
+///     "hello"
 /// })).await;
-/// assert_eq!(task_result, "hello world");
+/// assert_eq!(task_result, "hello");
+/// 
+/// let task_result = executor.execute_blocking(move |state: &mut Vec<u64>| {
+///     state.push(3);
+///     "world"
+/// }).await;
+/// assert_eq!(task_result, "world");
 /// 
 /// let result = executor.join().await;
-/// assert_eq!(result, vec!["first", "second", "third"]);
+/// assert_eq!(result, vec![0, 1, 2, 3]);
 /// # });
 /// # }
+/// 
+/// 
+/// async fn identity(v: u64) -> u64 {
+///     v
+/// }
 /// ```
 pub struct Executor<S> {
     executor: SyncMutex<Option<ExecutorState<S>>>,
+    is_aborted: OnceLock<Arc<AtomicBool>>
 }
 
 enum ExecutorState<S> {
@@ -57,6 +72,7 @@ impl<S> Executor<S> {
     pub const fn new(state: S) -> Self {
         Self {
             executor: SyncMutex::new(Some(ExecutorState::Idle { state })),
+            is_aborted: OnceLock::new(),
         }
     }
 }
@@ -70,45 +86,85 @@ impl<S: Default> Default for Executor<S> {
 
 impl<S: Send + 'static> Executor<S> {
 
-    /// Queues an asynchronous task for sequential execution, 
-    /// returning a [`TaskHandle`] to wait for it to complete.
-    ///
-    /// The task is executed even if the returned [`TaskHandle`] is dropped or never awaited.
+    /// Queues an asynchronous task for sequential execution and waits for it to complete.
     /// 
     /// The task is executed after all previously queued tasks have completed.
     /// Tasks are executed sequentially in the order they are queued, regardless of whether they are asynchronous or blocking.
     /// 
-    /// When the [`Executor`] is dropped, all queued tasks and running asynchronous tasks are aborted.
-    /// Blocking tasks that have already started may continue running to completion.
-    /// 
     /// # Panics
-    /// Awaiting the [`TaskHandle`] panics in the following cases:
-    /// - The task panics.
-    /// - A previous task panicked.
-    /// - The [`Executor`] is dropped.
+    /// Panics if the task or any previous task panicked.
     /// 
-    /// # Example
+    /// # Examples
     /// ```
     /// # fn main() {
     /// # tokio_test::block_on(async {
-    /// let executor = async_sequential::Executor::new(Vec::<&str>::new());
-    ///
-    /// executor.spawn(move |state| Box::pin(async move {
-    ///     state.push("first");
-    /// }));
+    /// let executor = async_sequential::Executor::new(Vec::new());
     /// 
-    /// executor.spawn_blocking(move |state| {
-    ///     state.push("second");
-    /// });
-    /// 
-    /// let task_result = executor.spawn(move |state| Box::pin(async move {
-    ///     state.push("third");
-    ///     "hello world"
+    /// executor.execute(move |state| Box::pin(async move {
+    ///     state.push(0);
     /// })).await;
-    /// assert_eq!(task_result, "hello world");
+    /// # });
+    /// # }
+    /// ```
+    pub async fn execute<T, R>(&self, task: T) -> R
+    where
+        T: for<'a> FnOnce(&'a mut S) -> Pin<Box<dyn Future<Output = R> + Send + 'a>> + Send + 'static,
+        R: Send + 'static,
+    {
+        self.spawn(task).await.unwrap_or_else(|e| panic!("{e}"))
+    }
+
+    /// Queues a blocking task for sequential execution and waits for it to complete.
     /// 
-    /// let result = executor.join().await;
-    /// assert_eq!(result, vec!["first", "second", "third"]);
+    /// The task is executed after all previously queued tasks have completed.
+    /// Tasks are executed sequentially in the order they are queued, regardless of whether they are asynchronous or blocking.
+    /// 
+    /// The blocking task is executed using blocking thread pool
+    /// to avoid blocking the asynchronous runtime.
+    /// 
+    /// # Panics
+    /// Panics if the task or any previous task panicked.
+    /// 
+    /// # Examples
+    /// ```
+    /// # fn main() {
+    /// # tokio_test::block_on(async {
+    /// let executor = async_sequential::Executor::new(Vec::new());
+    /// 
+    /// executor.execute_blocking(move |state| {
+    ///     state.push(0);
+    /// }).await;
+    /// # });
+    /// # }
+    /// ```
+    pub async fn execute_blocking<T, R>(&self, task: T) -> R
+    where
+        T: (FnOnce(&mut S) -> R) + Send + 'static,
+        R: Send + 'static,
+    {
+        self.spawn_blocking(task).await.unwrap_or_else(|e| panic!("{e}"))
+    }
+
+    /// Queues an asynchronous task for sequential execution, 
+    /// returning a [`TaskHandle`] to wait for it to complete.
+    /// 
+    /// The task is executed after all previously queued tasks have completed.
+    /// Tasks are executed sequentially in the order they are queued, regardless of whether they are asynchronous or blocking.
+    /// 
+    /// When the [`Executor`] is dropped,
+    /// all queued tasks and running asynchronous tasks are immediately aborted.
+    /// Blocking tasks that have already started cannot be aborted because they are not async
+    /// and continue running normally.
+    /// 
+    /// # Examples
+    /// ```
+    /// # fn main() {
+    /// # tokio_test::block_on(async {
+    /// let executor = async_sequential::Executor::new(Vec::new());
+    /// 
+    /// executor.spawn(move |state| Box::pin(async move {
+    ///     state.push(0);
+    /// }));
     /// # });
     /// # }
     /// ```
@@ -117,55 +173,41 @@ impl<S: Send + 'static> Executor<S> {
         T: for<'a> FnOnce(&'a mut S) -> Pin<Box<dyn Future<Output = R> + Send + 'a>> + Send + 'static,
         R: Send + 'static,
     {
+        let is_executor_aborted = self.resolve_executor_aborted();
         let (tx, rx) = oneshot::channel();
-        self.submit(Task::Async(Box::new(|s: &mut S| Box::pin(async {
+        let task = Task::Async(Box::new(|s: &mut S| Box::pin(async {
             let _ = tx.send(task(s).await);
-        }))));
-        TaskHandle { rx }
+        })));
+        
+        match self.submit(task) {
+            Ok(_) => TaskHandle { state: TaskHandleState::Pending { rx, is_executor_aborted } },
+            Err(_) => TaskHandle { state: TaskHandleState::PrevTaskPanic },
+        }
     }
 
     /// Queues a blocking task for sequential execution, 
     /// returning a [`TaskHandle`] to wait for it to complete.
     ///
-    /// The task is executed even if the returned [`TaskHandle`] is dropped or never awaited.
-    /// 
     /// The task is executed after all previously queued tasks have completed.
     /// Tasks are executed sequentially in the order they are queued, regardless of whether they are asynchronous or blocking.
     /// 
-    /// The blocking task is executed on a blocking thread
+    /// The blocking task is executed using blocking thread pool
     /// to avoid blocking the asynchronous runtime.
     /// 
-    /// When the [`Executor`] is dropped, all queued tasks and running asynchronous tasks are aborted.
-    /// Blocking tasks that have already started may continue running to completion.
+    /// When the [`Executor`] is dropped,
+    /// all queued tasks and running asynchronous tasks are immediately aborted.
+    /// Blocking tasks that have already started cannot be aborted because they are not async
+    /// and continue running normally.
     /// 
-    /// # Panics
-    /// Awaiting the [`TaskHandle`] panics in the following cases:
-    /// - The task panics.
-    /// - A previous task panicked.
-    /// - The [`Executor`] is dropped.
-    /// 
-    /// # Example
+    /// # Examples
     /// ```
     /// # fn main() {
     /// # tokio_test::block_on(async {
-    /// let executor = async_sequential::Executor::new(Vec::<&str>::new());
-    ///
-    /// executor.spawn(move |state| Box::pin(async move {
-    ///     state.push("first");
-    /// }));
+    /// let executor = async_sequential::Executor::new(Vec::new());
     /// 
     /// executor.spawn_blocking(move |state| {
-    ///     state.push("second");
+    ///     state.push(0);
     /// });
-    /// 
-    /// let task_result = executor.spawn(move |state| Box::pin(async move {
-    ///     state.push("third");
-    ///     "hello world"
-    /// })).await;
-    /// assert_eq!(task_result, "hello world");
-    /// 
-    /// let result = executor.join().await;
-    /// assert_eq!(result, vec!["first", "second", "third"]);
     /// # });
     /// # }
     /// ```
@@ -174,54 +216,58 @@ impl<S: Send + 'static> Executor<S> {
         T: (FnOnce(&mut S) -> R) + Send + 'static,
         R: Send + 'static,
     {
+        let is_executor_aborted = self.resolve_executor_aborted();
         let (tx, rx) = oneshot::channel();
-        self.submit(Task::Blocking(Box::new(move |s: &mut S| {
+        let task = Task::Blocking(Box::new(move |s: &mut S| {
             let _ = tx.send(task(s));
-        })));
-        TaskHandle { rx }
+        }));
+        
+        match self.submit(task) {
+            Ok(_) => TaskHandle { state: TaskHandleState::Pending { rx, is_executor_aborted } },
+            Err(_) => TaskHandle { state: TaskHandleState::PrevTaskPanic },
+        }
     }
 
     /// Waits for all queued tasks to complete and returns the final state.
     ///
     /// # Panics
-    /// Panics if any task panicked.
-    /// 
-    /// # Example
-    /// ```
-    /// # fn main() {
-    /// # tokio_test::block_on(async {
-    /// let executor = async_sequential::Executor::new(Vec::<&str>::new());
-    ///
-    /// executor.spawn(move |state| Box::pin(async move {
-    ///     state.push("first");
-    /// }));
-    /// 
-    /// executor.spawn_blocking(move |state| {
-    ///     state.push("second");
-    /// });
-    /// 
-    /// let result = executor.join().await;
-    /// assert_eq!(result, vec!["first", "second"]);
-    /// # });
-    /// # }
-    /// ```
+    /// Panics if any task panicked, whether before or during this method.
     pub async fn join(self) -> S {
-        match self.executor.lock().expect("any task has been panicked").take() {
-            Some(ExecutorState::Idle { state }) => state,
-            Some(ExecutorState::Running { handle, task_tx }) => {
+        self.try_join().await.unwrap_or_else(|e| panic!("{e}"))
+    }
+
+    /// Waits for all queued tasks to complete and returns the final state.
+    ///
+    /// # Errors
+    /// Returns an error if any task panicked, whether before or during this method.
+    pub async fn try_join(self) -> Result<S, TaskError> {
+        match self.executor.lock().unwrap().take() {
+            Some(ExecutorState::Idle { state }) => Ok(state),
+            Some(ExecutorState::Running { handle, task_tx, .. }) => {
                 drop(task_tx);
-                handle.await.expect("any task has been panicked")
+                match handle.await {
+                    Ok(state) => Ok(state),
+                    Err(e) if e.is_cancelled() => Err(TaskError { kind: TaskErrorKind::Cancelled }),
+                    Err(_) => Err(TaskError { kind: TaskErrorKind::Panic })
+                }
             }
             None => unreachable!("illegal closed executor"),
         }
     }
 
-    fn submit(&self, task: Task<S>) {
-        let mut locked_executor = self.executor.lock().expect("any task has been panicked");
+
+    fn resolve_executor_aborted(&self) -> Arc<AtomicBool> {
+        Arc::clone(self.is_aborted.get_or_init(|| Arc::new(AtomicBool::new(false))))
+    }
+ 
+    fn submit(&self, task: Task<S>) -> Result<(), ()> {
+        let mut locked_executor = self.executor.lock().unwrap();
 
         if let Some(ExecutorState::Running { ref task_tx, .. }) = *locked_executor {
-            task_tx.send(task).expect("any task has been panicked");
-            return;
+            return match task_tx.send(task) {
+                Ok(_) => Ok(()),
+                Err(_) => Err(())
+            }
         }
 
         *locked_executor = {
@@ -230,7 +276,7 @@ impl<S: Send + 'static> Executor<S> {
             };
 
             let (task_tx, mut task_rx) = mpsc::unbounded_channel::<Task<S>>();
-            task_tx.send(task).expect("illegal closed task_rx");
+            task_tx.send(task).unwrap();
 
             let handle = spawn(async move {
                 while let Some(task) = task_rx.recv().await {
@@ -249,6 +295,8 @@ impl<S: Send + 'static> Executor<S> {
 
             Some(ExecutorState::Running { task_tx, handle })
         };
+
+        Ok(())
     }
 }
 
@@ -258,6 +306,9 @@ impl<S> Drop for Executor<S> {
         match self.executor.lock().ok().and_then(|mut e| e.take()) {
             Some(ExecutorState::Idle { .. }) => {},
             Some(ExecutorState::Running { handle, .. }) => {
+                if let Some(is_aborted) = self.is_aborted.get() {
+                    is_aborted.store(true, Ordering::Release);
+                }
                 handle.abort();
             },
             None => {}
@@ -270,32 +321,147 @@ enum Task<S> {
     Async(Box<dyn (for<'a> FnOnce(&'a mut S) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>>) + Send>),
 }
 
+/// Handle for waiting for a queued task to complete.  
+///
+/// Awaiting the handle returns the task's result if the task completes successfully,
+/// or a [`TaskError`] if the task could not complete.
 pub struct TaskHandle<R> {
-    rx: oneshot::Receiver<R>,
+    state: TaskHandleState<R>,
+}
+
+enum TaskHandleState<R> {
+    PrevTaskPanic,
+    Pending {
+        rx: oneshot::Receiver<R>,
+        is_executor_aborted: Arc<AtomicBool>
+    }
 }
 
 impl<R> Future for TaskHandle<R> {
-    type Output = R;
+    type Output = Result<R, TaskError>;
 
     fn poll(
         mut self: Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<Self::Output> {
 
-        match Pin::new(&mut self.rx).poll(cx) {
-            std::task::Poll::Ready(Ok(value)) => std::task::Poll::Ready(value),
-            std::task::Poll::Ready(Err(_)) => panic!("any task panicked or executor dropped"),
-            std::task::Poll::Pending => std::task::Poll::Pending,
+        use std::task::Poll;
+
+        match &mut self.state {
+            TaskHandleState::PrevTaskPanic => {
+                Poll::Ready(Err(TaskError { kind: TaskErrorKind::Panic }))
+            },
+            TaskHandleState::Pending { rx, is_executor_aborted } => {
+                match Pin::new(rx).poll(cx) {
+                    Poll::Ready(Ok(value)) => Poll::Ready(Ok(value)),
+                    Poll::Ready(Err(_)) => {
+                        if is_executor_aborted.load(Ordering::Acquire) {
+                            Poll::Ready(Err(TaskError { kind: TaskErrorKind::Cancelled }))
+                        }
+                        else {
+                            Poll::Ready(Err(TaskError { kind: TaskErrorKind::Panic }))
+                        }
+                    },
+                    Poll::Pending => Poll::Pending,
+                }
+            },
         }
+    }
+}
+
+/// Error that occurred while waiting for a task to complete.
+#[derive(Debug)]
+pub struct TaskError {
+    kind: TaskErrorKind
+}
+
+#[derive(Debug)]
+enum TaskErrorKind {
+    Cancelled,
+    Panic,
+}
+
+impl TaskError {
+
+    /// Returns `true` if the error was caused by the [`Executor`] was dropped before the task completes.
+    /// 
+    /// # Examples
+    /// ```
+    /// # fn main() {
+    /// # tokio_test::block_on(async {
+    /// use std::time::Duration;
+    /// use tokio::time::sleep;
+    /// 
+    /// let executor = async_sequential::Executor::new(());
+    /// 
+    /// let handle = executor.spawn(move |_| Box::pin(async move {
+    ///     sleep(Duration::from_secs(10)).await;
+    /// }));
+    /// 
+    /// drop(executor);
+    /// 
+    /// let err = handle.await.unwrap_err();
+    /// assert!(err.is_cancelled());
+    /// assert!(!err.is_panic());
+    /// # });
+    /// # }
+    /// ```
+    pub fn is_cancelled(&self) -> bool {
+        matches!(self.kind, TaskErrorKind::Cancelled)
+    }
+
+    /// Returns `true` if the error was caused by the task or any previous task panicking.
+    /// 
+    /// # Examples
+    /// ```
+    /// # fn main() {
+    /// # tokio_test::block_on(async {
+    /// let executor = async_sequential::Executor::new(());
+    /// 
+    /// let handle = executor.spawn(move |_| Box::pin(async move {
+    ///     panic!()
+    /// }));
+    /// 
+    /// let err = handle.await.unwrap_err();
+    /// assert!(err.is_panic());
+    /// assert!(!err.is_cancelled());
+    /// # });
+    /// # }
+    /// ```
+    pub fn is_panic(&self) -> bool {
+        matches!(self.kind, TaskErrorKind::Panic)
+    }
+}
+
+impl fmt::Display for TaskError {
+
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self.kind {
+            TaskErrorKind::Cancelled => write!(f, "task was cancelled"),
+            TaskErrorKind::Panic => write!(f, "task panicked"),
+        }
+    }
+}
+
+impl std::error::Error for TaskError {}
+
+impl From<TaskError> for std::io::Error {
+
+    fn from(value: TaskError) -> std::io::Error {
+        std::io::Error::new(
+            std::io::ErrorKind::Other,
+            match value.kind {
+                TaskErrorKind::Cancelled => "task was cancelled",
+                TaskErrorKind::Panic => "task panicked",
+            },
+        )
     }
 }
 
 
 #[cfg(test)]
-mod test {
+mod tests {
     use super::*;
-    use std::sync::Arc;
-
 
     #[tokio::test]
     async fn readme_example() {
@@ -305,23 +471,244 @@ mod test {
             state.push(identity(0).await);
         }));
 
-        executor.spawn_blocking(move |state: &mut Vec<u64>| {
+        executor.spawn_blocking(move |state| {
             state.push(1);
         });
 
-        let task_result = executor.spawn(move |state: &mut Vec<u64>| Box::pin(async move {
+        let task_result = executor.execute(move |state| Box::pin(async move {
             state.push(identity(2).await);
-            "hello world"
+            "hello"
         })).await;
-        assert_eq!(task_result, "hello world");
+        assert_eq!(task_result, "hello");
+
+        let task_result = executor.execute_blocking(move |state| {
+            state.push(3);
+            "world"
+        }).await;
+        assert_eq!(task_result, "world");
 
         let result = executor.join().await;
-        assert_eq!(result, vec![0, 1, 2]);
+        assert_eq!(result, vec![0, 1, 2, 3]);
 
         async fn identity(v: u64) -> u64 {
             v
         }
     }
+
+    #[tokio::test]
+    async fn test1() {
+        let executor = Executor::new(Vec::new());
+        let c = 1000;
+
+        for i in 0..c {
+            if i % 2 == 0 {
+                executor.spawn(move |state| Box::pin(async move { state.push(i); }));
+            }
+            else {
+                executor.spawn_blocking(move |state| { state.push(i); });
+            }
+        }
+
+        assert_eq!(executor.join().await, (0..c).collect::<Vec<_>>());
+    }
+
+    #[tokio::test]
+    async fn test2() {
+        let executor = Executor::new(Vec::new());
+        let c = 1000;
+
+        for i in 0..c {
+            if i % 2 == 0 {
+                let r = executor.spawn(move |state| Box::pin(async move { 
+                    state.push(i); 
+                    i
+                })).await;
+
+                assert_eq!(r.unwrap(), i);
+            }
+            else {
+                let r = executor.spawn_blocking(move |state| { 
+                    state.push(i); 
+                    i
+                }).await;
+
+                assert_eq!(r.unwrap(), i);
+            }
+        }
+
+        assert_eq!(executor.join().await, (0..c).collect::<Vec<_>>());
+    }
+
+    #[tokio::test]
+    async fn test3() {
+        let executor = Executor::new(Vec::new());
+        let c = 1000;
+
+        for i in 0..c {
+            if i % 2 == 0 {
+                executor.execute(move |state| Box::pin(async move { state.push(i); })).await;
+            }
+            else {
+                executor.execute_blocking(move |state| { state.push(i); }).await;
+            }
+        }
+
+        assert_eq!(executor.join().await, (0..c).collect::<Vec<_>>());
+    }
+
+    #[tokio::test]
+    async fn test4() {
+        let executor = Executor::new(vec![0]);
+        assert_eq!(executor.join().await, vec![0]);
+    }
+
+    #[tokio::test]
+    async fn test5() {
+        let executor = Executor::new(vec![0]);
+        assert_eq!(executor.try_join().await.unwrap(), vec![0]);
+    }
+
+    #[tokio::test]
+    async fn test6() {
+        let executor = Executor::new(vec![0]);
+        executor.spawn(|_| Box::pin(async { panic!() }));
+        let r = executor.try_join().await;
+        assert!(r.as_ref().is_err_and(|e| e.is_panic()));
+        assert!(r.as_ref().is_err_and(|e| !e.is_cancelled()));
+    }
+
+    #[tokio::test]
+    async fn test7() {
+        {
+            let executor = Executor::new(());
+        
+            let (tx, rx) = oneshot::channel();
+            let handle = executor.spawn(move |_| Box::pin(async {
+                rx.await.unwrap();
+            }));
+
+            drop(executor);
+            tx.send(()).unwrap();
+
+            let r = handle.await;
+            assert!(r.as_ref().is_err_and(|e| e.is_cancelled()));
+            assert!(r.as_ref().is_err_and(|e| !e.is_panic()));
+        }
+        {
+            let executor = Executor::new(());
+        
+            let (tx, rx) = oneshot::channel();
+            let handle = executor.spawn_blocking(move |_| {
+                rx.blocking_recv().unwrap();
+            });
+
+            drop(executor);
+            tx.send(()).unwrap();
+
+            let r = handle.await;
+            assert!(r.as_ref().is_err_and(|e| e.is_cancelled()));
+            assert!(r.as_ref().is_err_and(|e| !e.is_panic()));
+        }
+    }
+
+    #[tokio::test]
+    async fn test8() {
+        {
+            let executor = Executor::new(());
+        
+            let handle = executor.spawn(move |_| Box::pin(async {
+                panic!()
+            }));
+
+            let r = handle.await;
+            assert!(r.as_ref().is_err_and(|e| !e.is_cancelled()));
+            assert!(r.as_ref().is_err_and(|e| e.is_panic()));
+        }
+        {
+            let executor = Executor::new(());
+        
+            let handle = executor.spawn_blocking(move |_| {
+                panic!()
+            });
+
+            let r = handle.await;
+            assert!(r.as_ref().is_err_and(|e| !e.is_cancelled()));
+            assert!(r.as_ref().is_err_and(|e| e.is_panic()));
+        }
+    }
+
+    #[tokio::test]
+    async fn test9() {
+        {
+            let executor = Executor::new(());
+        
+            let (tx, rx) = oneshot::channel();
+            let handle = executor.spawn(move |_| Box::pin(async {
+                rx.await.unwrap();
+                panic!()
+            }));
+
+            drop(executor);
+            tx.send(()).unwrap();
+
+            let r = handle.await;
+            assert!(r.as_ref().is_err_and(|e| e.is_cancelled()));
+            assert!(r.as_ref().is_err_and(|e| !e.is_panic()));
+        }
+        {
+            let executor = Executor::new(());
+        
+            let (tx, rx) = oneshot::channel();
+            let handle = executor.spawn_blocking(move |_| {
+                rx.blocking_recv().unwrap();
+                panic!()
+            });
+
+            drop(executor);
+            tx.send(()).unwrap();
+
+            let r = handle.await;
+            assert!(r.as_ref().is_err_and(|e| e.is_cancelled()));
+            assert!(r.as_ref().is_err_and(|e| !e.is_panic()));
+        }
+    }
+
+    #[tokio::test]
+    async fn test10() {
+        {
+            let executor = Executor::new(());
+        
+            executor.spawn(move |_| Box::pin(async {
+                panic!()
+            }));
+            let handle = executor.spawn(move |_| Box::pin(async {
+                
+            }));
+
+            let r = handle.await;
+            assert!(r.as_ref().is_err_and(|e| !e.is_cancelled()));
+            assert!(r.as_ref().is_err_and(|e| e.is_panic()));
+        }
+        {
+            let executor = Executor::new(());
+        
+            executor.spawn_blocking(move |_| {
+                panic!()
+            });
+            let handle = executor.spawn_blocking(move |_| {
+                
+            });
+
+            let r = handle.await;
+            assert!(r.as_ref().is_err_and(|e| !e.is_cancelled()));
+            assert!(r.as_ref().is_err_and(|e| e.is_panic()));
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests2 {
+    use super::*;
 
     #[tokio::test]
     async fn test1() {
@@ -331,17 +718,17 @@ mod test {
             if ctx == "0" {
                 *ctx = "1".into();
             }
-        }).await;
+        }).await.ok();
         se.spawn(|ctx| Box::pin(async move {
             if ctx == "1" {
                 *ctx = "2".into();
             }
-        })).await;
+        })).await.ok();
         se.spawn(|ctx| Box::pin(async move {
             if ctx == "2" {
                 *ctx = "3".into();
             }
-        })).await;
+        })).await.ok();
 
         let result = se.join().await;
 
@@ -353,15 +740,15 @@ mod test {
         let se = Executor::new(0);
 
         tokio::join!(
-            se.spawn(|ctx| Box::pin(async{*ctx += 1;})),
-            se.spawn(|ctx| Box::pin(async{*ctx += 1;})),
-            se.spawn(|ctx| Box::pin(async{*ctx += 1;})),
-            se.spawn_blocking(|ctx| {*ctx += 1;}),
-            se.spawn_blocking(|ctx| {*ctx += 1;}),
-            se.spawn_blocking(|ctx| {*ctx += 1;}),
-            se.spawn_blocking(|ctx| {*ctx += 1;}),
-            se.spawn_blocking(|ctx| {*ctx += 1;}),
-            se.spawn_blocking(|ctx| {*ctx += 1;}),
+            se.execute(|ctx| Box::pin(async{*ctx += 1;})),
+            se.execute(|ctx| Box::pin(async{*ctx += 1;})),
+            se.execute(|ctx| Box::pin(async{*ctx += 1;})),
+            se.execute_blocking(|ctx| {*ctx += 1;}),
+            se.execute_blocking(|ctx| {*ctx += 1;}),
+            se.execute_blocking(|ctx| {*ctx += 1;}),
+            se.execute_blocking(|ctx| {*ctx += 1;}),
+            se.execute_blocking(|ctx| {*ctx += 1;}),
+            se.execute_blocking(|ctx| {*ctx += 1;}),
         );
 
         let result = se.join().await;
@@ -379,10 +766,10 @@ mod test {
             let se1 = Arc::clone(&se);
             let se2 = Arc::clone(&se);
             set.spawn(async move {
-                se1.spawn(|ctx| Box::pin(async{*ctx += 1;})).await;
+                se1.execute(|ctx| Box::pin(async{*ctx += 1;})).await;
             });
             set.spawn(async move {
-                se2.spawn_blocking(|ctx| {*ctx += 1;}).await;
+                se2.execute_blocking(|ctx| {*ctx += 1;}).await;
             });
         }
 
@@ -405,12 +792,12 @@ mod test {
         let se = Executor::new(Vec::<&'static str>::new());
 
         tokio::join!(
-            se.spawn(|ctx| Box::pin(async {
+            se.execute(|ctx| Box::pin(async {
                 ctx.push("1");
                 tokio::task::yield_now().await;
                 ctx.push("2");
             })),
-            se.spawn(|ctx| Box::pin(async {
+            se.execute(|ctx| Box::pin(async {
                 ctx.push("3");
             })),
         );
@@ -424,7 +811,7 @@ mod test {
     async fn test6() {
         let se = Executor::new(Vec::<&'static str>::new());
 
-        se.spawn(|_ctx| Box::pin(async {
+        se.execute(|_ctx| Box::pin(async {
             panic!()
         })).await;
     }
@@ -434,7 +821,7 @@ mod test {
     async fn test7() {
         let se = Executor::new(Vec::<&'static str>::new());
 
-        se.spawn_blocking(|_ctx| {
+        se.execute_blocking(|_ctx| {
             panic!()
         }).await;
     }
@@ -466,7 +853,7 @@ mod test {
 
         se.spawn_blocking(|_ctx| {
             panic!()
-        }).await;
+        }).await.unwrap();
     }
 
     #[tokio::test]
@@ -476,7 +863,7 @@ mod test {
 
         se.spawn(|_ctx| Box::pin(async {
             panic!()
-        })).await;
+        })).await.unwrap();
     }
 
     #[tokio::test]
@@ -490,7 +877,7 @@ mod test {
             panic!()
         }));
 
-        se.spawn_blocking(|_ctx| {}).await;
+        se.spawn_blocking(|_ctx| {}).await.unwrap();
     }
 
     #[tokio::test]
@@ -555,7 +942,7 @@ mod test {
         }));
         drop(se);
         let _ = tx.send(());
-        handle.await;
+        handle.await.unwrap();
     }
 
     #[tokio::test]
@@ -618,7 +1005,7 @@ mod test {
 
         drop(executor);
 
-        handle.await;
+        handle.await.unwrap();
     }
 
     #[tokio::test]
@@ -642,7 +1029,7 @@ mod test {
 
         drop(executor);
 
-        queued_handle.await;
+        queued_handle.await.unwrap();
     }
 
     #[tokio::test]

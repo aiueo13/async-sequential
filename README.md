@@ -16,18 +16,24 @@ async fn example() {
         state.push(identity(0).await);
     }));
 
-    executor.spawn_blocking(move |state: &mut Vec<u64>| {
+    executor.spawn_blocking(move |state| {
         state.push(1);
     });
 
-    let task_result = executor.spawn(move |state: &mut Vec<u64>| Box::pin(async move {
+    let task_result = executor.execute(move |state| Box::pin(async move {
         state.push(identity(2).await);
-        "hello world"
+        "hello"
     })).await;
-    assert_eq!(task_result, "hello world");
+    assert_eq!(task_result, "hello");
+
+    let task_result = executor.execute_blocking(move |state| {
+        state.push(3);
+        "world"
+    }).await;
+    assert_eq!(task_result, "world");
 
     let result = executor.join().await;
-    assert_eq!(result, vec![0, 1, 2]);
+    assert_eq!(result, vec![0, 1, 2, 3]);
 }
 
 async fn identity(v: u64) -> u64 {
