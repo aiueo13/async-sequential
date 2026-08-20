@@ -1,16 +1,13 @@
 use std::pin::Pin;
 use std::future::Future;
-use std::sync::{Arc, Mutex as SyncMutex, OnceLock, atomic::{AtomicBool, Ordering}};
+use std::sync::{Arc, Mutex as SyncMutex, LazyLock, atomic::{AtomicBool, Ordering}};
 use std::fmt;
 use tokio::{task::{spawn, spawn_blocking, JoinHandle as SpawnJoinHandle}, sync::{oneshot, mpsc}};
 
 
 /// Executor for running asynchronous and blocking tasks sequentially on a shared mutable state.
 /// 
-/// When the [`Executor`] is dropped,
-/// all queued tasks and running asynchronous tasks are immediately aborted.
-/// Blocking tasks that have already started cannot be aborted because they are not async
-/// and continue running normally.
+/// When a [`Executor`] is dropped, all tasks in the executor are immediately aborted.
 /// 
 /// # Examples
 /// ```
@@ -50,7 +47,7 @@ use tokio::{task::{spawn, spawn_blocking, JoinHandle as SpawnJoinHandle}, sync::
 /// ```
 pub struct Executor<S> {
     executor: SyncMutex<Option<ExecutorState<S>>>,
-    is_aborted: OnceLock<Arc<AtomicBool>>
+    is_aborted: LazyLock<Arc<AtomicBool>>
 }
 
 enum ExecutorState<S> {
@@ -72,7 +69,7 @@ impl<S> Executor<S> {
     pub const fn new(state: S) -> Self {
         Self {
             executor: SyncMutex::new(Some(ExecutorState::Idle { state })),
-            is_aborted: OnceLock::new(),
+            is_aborted: LazyLock::new(|| Arc::new(AtomicBool::new(false))),
         }
     }
 }
@@ -92,7 +89,8 @@ impl<S: Send + 'static> Executor<S> {
     /// Tasks are executed sequentially in the order they are queued, regardless of whether they are asynchronous or blocking.
     /// 
     /// # Panics
-    /// Panics if the task or any previous task panicked.
+    /// Panics if the task or any previous task panicked,
+    /// or if this method is called outside Tokio runtime.
     /// 
     /// # Examples
     /// ```
@@ -123,7 +121,8 @@ impl<S: Send + 'static> Executor<S> {
     /// to avoid blocking the asynchronous runtime.
     /// 
     /// # Panics
-    /// Panics if the task or any previous task panicked.
+    /// Panics if the task or any previous task panicked,
+    /// or if this method is called outside Tokio runtime.
     /// 
     /// # Examples
     /// ```
@@ -151,10 +150,10 @@ impl<S: Send + 'static> Executor<S> {
     /// The task is executed after all previously queued tasks have completed.
     /// Tasks are executed sequentially in the order they are queued, regardless of whether they are asynchronous or blocking.
     /// 
-    /// When the [`Executor`] is dropped,
-    /// all queued tasks and running asynchronous tasks are immediately aborted.
-    /// Blocking tasks that have already started cannot be aborted because they are not async
-    /// and continue running normally.
+    /// When a [`Executor`] is dropped, all tasks in the executor are immediately aborted.
+    /// 
+    /// # Panics
+    /// Panics if this method is called outside Tokio runtime.
     /// 
     /// # Examples
     /// ```
@@ -173,7 +172,7 @@ impl<S: Send + 'static> Executor<S> {
         T: for<'a> FnOnce(&'a mut S) -> Pin<Box<dyn Future<Output = R> + Send + 'a>> + Send + 'static,
         R: Send + 'static,
     {
-        let is_executor_aborted = self.resolve_executor_aborted();
+        let is_executor_aborted = Arc::clone(&self.is_aborted);
         let (tx, rx) = oneshot::channel();
         let task = Task::Async(Box::new(|s: &mut S| Box::pin(async {
             let _ = tx.send(task(s).await);
@@ -194,10 +193,10 @@ impl<S: Send + 'static> Executor<S> {
     /// The blocking task is executed using blocking thread pool
     /// to avoid blocking the asynchronous runtime.
     /// 
-    /// When the [`Executor`] is dropped,
-    /// all queued tasks and running asynchronous tasks are immediately aborted.
-    /// Blocking tasks that have already started cannot be aborted because they are not async
-    /// and continue running normally.
+    /// When a [`Executor`] is dropped, all tasks in the executor are immediately aborted.
+    /// 
+    /// # Panics
+    /// Panics if this method is called outside Tokio runtime.
     /// 
     /// # Examples
     /// ```
@@ -216,7 +215,7 @@ impl<S: Send + 'static> Executor<S> {
         T: (FnOnce(&mut S) -> R) + Send + 'static,
         R: Send + 'static,
     {
-        let is_executor_aborted = self.resolve_executor_aborted();
+        let is_executor_aborted = Arc::clone(&self.is_aborted);
         let (tx, rx) = oneshot::channel();
         let task = Task::Blocking(Box::new(move |s: &mut S| {
             let _ = tx.send(task(s));
@@ -231,7 +230,8 @@ impl<S: Send + 'static> Executor<S> {
     /// Waits for all queued tasks to complete and returns the final state.
     ///
     /// # Panics
-    /// Panics if any task panicked, whether before or during this method.
+    /// Panics if any task panicked before or during this method,
+    /// or if this method is called outside Tokio runtime.
     pub async fn join(self) -> S {
         self.try_join().await.unwrap_or_else(|e| panic!("{e}"))
     }
@@ -239,7 +239,10 @@ impl<S: Send + 'static> Executor<S> {
     /// Waits for all queued tasks to complete and returns the final state.
     ///
     /// # Errors
-    /// Returns an error if any task panicked, whether before or during this method.
+    /// Returns an error if any task panicked before or during this method.
+    /// 
+    /// # Panics
+    /// Panics if this method is called outside Tokio runtime.
     pub async fn try_join(self) -> Result<S, TaskError> {
         match self.executor.lock().unwrap().take() {
             Some(ExecutorState::Idle { state }) => Ok(state),
@@ -256,10 +259,6 @@ impl<S: Send + 'static> Executor<S> {
     }
 
 
-    fn resolve_executor_aborted(&self) -> Arc<AtomicBool> {
-        Arc::clone(self.is_aborted.get_or_init(|| Arc::new(AtomicBool::new(false))))
-    }
- 
     fn submit(&self, task: Task<S>) -> Result<(), ()> {
         let mut locked_executor = self.executor.lock().unwrap();
 
@@ -306,9 +305,7 @@ impl<S> Drop for Executor<S> {
         match self.executor.lock().ok().and_then(|mut e| e.take()) {
             Some(ExecutorState::Idle { .. }) => {},
             Some(ExecutorState::Running { handle, .. }) => {
-                if let Some(is_aborted) = self.is_aborted.get() {
-                    is_aborted.store(true, Ordering::Release);
-                }
+                self.is_aborted.store(true, Ordering::Release);
                 handle.abort();
             },
             None => {}
