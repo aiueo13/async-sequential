@@ -1,490 +1,338 @@
-use std::pin::Pin;
-use std::future::Future;
-use std::sync::{Arc, Mutex as SyncMutex, LazyLock, atomic::{AtomicBool, Ordering}};
-use std::fmt;
-use tokio::{task::{spawn, spawn_blocking, JoinHandle as SpawnJoinHandle}, sync::{oneshot, mpsc}};
+mod internal;
+mod executor;
+mod task_error;
+mod task_handle;
 
+use internal::*;
 
-/// Executor for running asynchronous and blocking tasks sequentially on a shared mutable state.
-/// 
-/// Tasks are executed sequentially in the order they are queued,
-/// regardless of whether they are asynchronous or blocking.
-/// 
-/// If a task panics, subsequent tasks also panic because the state invariants
-/// may have been violated by the task's panic.
-/// 
-/// When the executor is dropped, all tasks in the executor are immediately aborted.
-/// Note blocking tasks are not asynchronous, so if one is already running,
-/// aborting it only detaches it from a [`TaskHandle`],
-/// and it continues running while holding the state.
-/// 
-/// # Examples
-/// ```
-/// # fn main() {
-/// # tokio_test::block_on(async {
-/// let executor = async_sequential::Executor::new(Vec::new());
-/// 
-/// executor.spawn(move |state: &mut Vec<u64>| Box::pin(async move {
-///     state.push(identity(0).await);
-/// }));
-/// 
-/// executor.spawn_blocking(move |state: &mut Vec<u64>| {
-///     state.push(1);
-/// });
-/// 
-/// let task_result = executor.execute(move |state: &mut Vec<u64>| Box::pin(async move {
-///     state.push(identity(2).await);
-///     "hello"
-/// })).await;
-/// assert_eq!(task_result, "hello");
-/// 
-/// let task_result = executor.execute_blocking(move |state: &mut Vec<u64>| {
-///     state.push(3);
-///     "world"
-/// }).await;
-/// assert_eq!(task_result, "world");
-/// 
-/// let result = executor.join().await;
-/// assert_eq!(result, vec![0, 1, 2, 3]);
-/// # });
-/// # }
-/// 
-/// 
-/// async fn identity(v: u64) -> u64 {
-///     v
-/// }
-/// ```
-pub struct Executor<S> {
-    executor: SyncMutex<Option<ExecutorState<S>>>,
-    is_aborted: LazyLock<Arc<AtomicBool>>
-}
-
-enum ExecutorState<S> {
-    Idle {
-        state: S,
-    },
-    Running {
-        task_tx: mpsc::UnboundedSender<Task<S>>,
-        handle: SpawnJoinHandle<S>,
-    },
-}
-
-impl<S> Executor<S> {
-
-    /// Creates a new executor with the given initial state.
-    ///
-    /// The state is owned by the executor
-    /// and is made available to tasks through exclusive mutable access.
-    pub const fn new(state: S) -> Self {
-        Self {
-            executor: SyncMutex::new(Some(ExecutorState::Idle { state })),
-            is_aborted: LazyLock::new(|| Arc::new(AtomicBool::new(false))),
-        }
-    }
-}
-
-impl<S: Default> Default for Executor<S> {
-
-    fn default() -> Self {
-        Self::new(S::default())
-    }
-}
-
-impl<S: Send + 'static> Executor<S> {
-
-    /// Queues an asynchronous task for sequential execution and waits for it to complete.
-    /// 
-    /// The task is executed after all previously queued tasks have completed.
-    /// Tasks are executed sequentially in the order they are queued,
-    /// regardless of whether they are asynchronous or blocking.
-    /// 
-    /// # Panics
-    /// Panics if the task or any previous task panicked,
-    /// or if this method is called outside Tokio runtime.
-    /// 
-    /// # Examples
-    /// ```
-    /// # fn main() {
-    /// # tokio_test::block_on(async {
-    /// let executor = async_sequential::Executor::new(Vec::new());
-    /// 
-    /// executor.execute(move |state| Box::pin(async move {
-    ///     state.push(0);
-    /// })).await;
-    /// # });
-    /// # }
-    /// ```
-    pub async fn execute<T, R>(&self, task: T) -> R
-    where
-        T: for<'a> FnOnce(&'a mut S) -> Pin<Box<dyn Future<Output = R> + Send + 'a>> + Send + 'static,
-        R: Send + 'static,
-    {
-        self.spawn(task).await.unwrap_or_else(|e| panic!("{e}"))
-    }
-
-    /// Queues a blocking task for sequential execution and waits for it to complete.
-    /// 
-    /// The task is executed after all previously queued tasks have completed.
-    /// Tasks are executed sequentially in the order they are queued,
-    /// regardless of whether they are asynchronous or blocking.
-    /// 
-    /// The blocking task is executed using blocking thread pool
-    /// to avoid blocking the asynchronous runtime.
-    /// 
-    /// # Panics
-    /// Panics if the task or any previous task panicked,
-    /// or if this method is called outside Tokio runtime.
-    /// 
-    /// # Examples
-    /// ```
-    /// # fn main() {
-    /// # tokio_test::block_on(async {
-    /// let executor = async_sequential::Executor::new(Vec::new());
-    /// 
-    /// executor.execute_blocking(move |state| {
-    ///     state.push(0);
-    /// }).await;
-    /// # });
-    /// # }
-    /// ```
-    pub async fn execute_blocking<T, R>(&self, task: T) -> R
-    where
-        T: (FnOnce(&mut S) -> R) + Send + 'static,
-        R: Send + 'static,
-    {
-        self.spawn_blocking(task).await.unwrap_or_else(|e| panic!("{e}"))
-    }
-
-    /// Queues an asynchronous task for sequential execution, 
-    /// returning a [`TaskHandle`] to wait for it to complete.
-    /// 
-    /// The task is executed after all previously queued tasks have completed.
-    /// Tasks are executed sequentially in the order they are queued,
-    /// regardless of whether they are asynchronous or blocking.
-    /// 
-    /// When a [`Executor`] is dropped, all tasks in the executor are immediately aborted.
-    /// 
-    /// # Panics
-    /// Panics if this method is called outside Tokio runtime.
-    /// 
-    /// # Examples
-    /// ```
-    /// # fn main() {
-    /// # tokio_test::block_on(async {
-    /// let executor = async_sequential::Executor::new(Vec::new());
-    /// 
-    /// executor.spawn(move |state| Box::pin(async move {
-    ///     state.push(0);
-    /// }));
-    /// # });
-    /// # }
-    /// ```
-    pub fn spawn<T, R>(&self, task: T) -> TaskHandle<R>
-    where
-        T: for<'a> FnOnce(&'a mut S) -> Pin<Box<dyn Future<Output = R> + Send + 'a>> + Send + 'static,
-        R: Send + 'static,
-    {
-        let is_executor_aborted = Arc::clone(&self.is_aborted);
-        let (tx, rx) = oneshot::channel();
-        let task = Task::Async(Box::new(|s: &mut S| Box::pin(async {
-            let _ = tx.send(task(s).await);
-        })));
-        
-        match self.submit(task) {
-            Ok(_) => TaskHandle { state: TaskHandleState::Pending { rx, is_executor_aborted } },
-            Err(_) => TaskHandle { state: TaskHandleState::PrevTaskPanic },
-        }
-    }
-
-    /// Queues a blocking task for sequential execution, 
-    /// returning a [`TaskHandle`] to wait for it to complete.
-    ///
-    /// The task is executed after all previously queued tasks have completed.
-    /// Tasks are executed sequentially in the order they are queued,
-    /// regardless of whether they are asynchronous or blocking.
-    /// 
-    /// The blocking task is executed using blocking thread pool
-    /// to avoid blocking the asynchronous runtime.
-    /// 
-    /// When a [`Executor`] is dropped, all tasks in the executor are immediately aborted.
-    /// Note blocking tasks are not asynchronous, so if one is already running,
-    /// aborting it only detaches it from the [`TaskHandle`],
-    /// and it continues running while holding the state.
-    /// 
-    /// # Panics
-    /// Panics if this method is called outside Tokio runtime.
-    /// 
-    /// # Examples
-    /// ```
-    /// # fn main() {
-    /// # tokio_test::block_on(async {
-    /// let executor = async_sequential::Executor::new(Vec::new());
-    /// 
-    /// executor.spawn_blocking(move |state| {
-    ///     state.push(0);
-    /// });
-    /// # });
-    /// # }
-    /// ```
-    pub fn spawn_blocking<T, R>(&self, task: T) -> TaskHandle<R>
-    where
-        T: (FnOnce(&mut S) -> R) + Send + 'static,
-        R: Send + 'static,
-    {
-        let is_executor_aborted = Arc::clone(&self.is_aborted);
-        let (tx, rx) = oneshot::channel();
-        let task = Task::Blocking(Box::new(move |s: &mut S| {
-            let _ = tx.send(task(s));
-        }));
-        
-        match self.submit(task) {
-            Ok(_) => TaskHandle { state: TaskHandleState::Pending { rx, is_executor_aborted } },
-            Err(_) => TaskHandle { state: TaskHandleState::PrevTaskPanic },
-        }
-    }
-
-    /// Waits for all queued tasks to complete and returns the final state.
-    ///
-    /// # Panics
-    /// Panics if any task panicked before or during this method,
-    /// or if this method is called outside Tokio runtime.
-    pub async fn join(self) -> S {
-        self.try_join().await.unwrap_or_else(|e| panic!("{e}"))
-    }
-
-    /// Waits for all queued tasks to complete and returns the final state.
-    ///
-    /// # Errors
-    /// Returns an error if any task panicked before or during this method.
-    /// 
-    /// # Panics
-    /// Panics if this method is called outside Tokio runtime.
-    pub async fn try_join(self) -> Result<S, TaskError> {
-        match self.executor.lock().unwrap().take() {
-            Some(ExecutorState::Idle { state }) => Ok(state),
-            Some(ExecutorState::Running { handle, task_tx, .. }) => {
-                drop(task_tx);
-                match handle.await {
-                    Ok(state) => Ok(state),
-                    Err(e) if e.is_cancelled() => Err(TaskError { kind: TaskErrorKind::Cancelled }),
-                    Err(_) => Err(TaskError { kind: TaskErrorKind::Panic })
-                }
-            }
-            None => unreachable!("illegal closed executor"),
-        }
-    }
-
-
-    fn submit(&self, task: Task<S>) -> Result<(), ()> {
-        let mut locked_executor = self.executor.lock().unwrap();
-
-        if let Some(ExecutorState::Running { ref task_tx, .. }) = *locked_executor {
-            return match task_tx.send(task) {
-                Ok(_) => Ok(()),
-                Err(_) => Err(())
-            }
-        }
-
-        *locked_executor = {
-            let Some(ExecutorState::Idle { mut state }) = locked_executor.take() else {
-                unreachable!("illegal closed executor")
-            };
-
-            let (task_tx, mut task_rx) = mpsc::unbounded_channel::<Task<S>>();
-            task_tx.send(task).unwrap();
-
-            let handle = spawn(async move {
-                while let Some(task) = task_rx.recv().await {
-                    match task {
-                        Task::Blocking(task) => {
-                            state = spawn_blocking(move || {
-                                task(&mut state);
-                                state
-                            }).await.expect("blocking task unexpectedly failed");
-                        },
-                        Task::Async(task) => task(&mut state).await,
-                    }
-                }
-                state
-            });
-
-            Some(ExecutorState::Running { task_tx, handle })
-        };
-
-        Ok(())
-    }
-}
-
-impl<S> Drop for Executor<S> {
-
-    fn drop(&mut self) {
-        match self.executor.lock().ok().and_then(|mut e| e.take()) {
-            Some(ExecutorState::Idle { .. }) => {},
-            Some(ExecutorState::Running { handle, .. }) => {
-                self.is_aborted.store(true, Ordering::Release);
-                handle.abort();
-            },
-            None => {}
-        }
-    }
-}
-
-enum Task<S> {
-    Blocking(Box<dyn (FnOnce(&mut S) -> ()) + Send>),
-    Async(Box<dyn (for<'a> FnOnce(&'a mut S) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>>) + Send>),
-}
-
-/// Handle for waiting for a queued task to complete.  
-///
-/// Awaiting the handle returns the task's result if the task completes successfully,
-/// or a [`TaskError`] if the task could not complete.
-pub struct TaskHandle<R> {
-    state: TaskHandleState<R>,
-}
-
-enum TaskHandleState<R> {
-    PrevTaskPanic,
-    Pending {
-        rx: oneshot::Receiver<R>,
-        is_executor_aborted: Arc<AtomicBool>
-    }
-}
-
-impl<R> Future for TaskHandle<R> {
-    type Output = Result<R, TaskError>;
-
-    fn poll(
-        mut self: Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<Self::Output> {
-
-        use std::task::Poll;
-
-        match &mut self.state {
-            TaskHandleState::PrevTaskPanic => {
-                Poll::Ready(Err(TaskError { kind: TaskErrorKind::Panic }))
-            },
-            TaskHandleState::Pending { rx, is_executor_aborted } => {
-                match Pin::new(rx).poll(cx) {
-                    Poll::Ready(Ok(value)) => Poll::Ready(Ok(value)),
-                    Poll::Ready(Err(_)) => {
-                        if is_executor_aborted.load(Ordering::Acquire) {
-                            Poll::Ready(Err(TaskError { kind: TaskErrorKind::Cancelled }))
-                        }
-                        else {
-                            Poll::Ready(Err(TaskError { kind: TaskErrorKind::Panic }))
-                        }
-                    },
-                    Poll::Pending => Poll::Pending,
-                }
-            },
-        }
-    }
-}
-
-/// Error that occurred while waiting for a task to complete.
-#[derive(Debug)]
-pub struct TaskError {
-    kind: TaskErrorKind
-}
-
-#[derive(Debug)]
-enum TaskErrorKind {
-    Cancelled,
-    Panic,
-}
-
-impl TaskError {
-
-    /// Returns `true` if the error was caused by the [`Executor`] was dropped before the task completes.
-    /// 
-    /// # Examples
-    /// ```
-    /// # fn main() {
-    /// # tokio_test::block_on(async {
-    /// use std::time::Duration;
-    /// use tokio::time::sleep;
-    /// 
-    /// let executor = async_sequential::Executor::new(());
-    /// 
-    /// let handle = executor.spawn(move |_| Box::pin(async move {
-    ///     sleep(Duration::from_secs(10)).await;
-    /// }));
-    /// 
-    /// drop(executor);
-    /// 
-    /// let err = handle.await.unwrap_err();
-    /// assert!(err.is_cancelled());
-    /// assert!(!err.is_panic());
-    /// # });
-    /// # }
-    /// ```
-    pub fn is_cancelled(&self) -> bool {
-        matches!(self.kind, TaskErrorKind::Cancelled)
-    }
-
-    /// Returns `true` if the error was caused by the task or any previous task panicking.
-    /// 
-    /// # Examples
-    /// ```
-    /// # fn main() {
-    /// # tokio_test::block_on(async {
-    /// let executor = async_sequential::Executor::new(());
-    /// 
-    /// let handle1 = executor.spawn(move |_| Box::pin(async move {
-    ///     panic!()
-    /// }));
-    /// let handle2 = executor.spawn(move |_| Box::pin(async move {
-    ///     
-    /// }));
-    /// 
-    /// let err1 = handle1.await.unwrap_err();
-    /// assert!(err1.is_panic());
-    /// assert!(!err1.is_cancelled());
-    /// 
-    /// // Subsequent tasks also panic
-    /// // because the state invariants may have been violated
-    /// // by the preceding task's panic.
-    /// let err2 = handle2.await.unwrap_err();
-    /// assert!(err2.is_panic());
-    /// assert!(!err2.is_cancelled());
-    /// # });
-    /// # }
-    /// ```
-    pub fn is_panic(&self) -> bool {
-        matches!(self.kind, TaskErrorKind::Panic)
-    }
-}
-
-impl fmt::Display for TaskError {
-
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self.kind {
-            TaskErrorKind::Cancelled => write!(f, "task was cancelled"),
-            TaskErrorKind::Panic => write!(f, "task panicked"),
-        }
-    }
-}
-
-impl std::error::Error for TaskError {}
-
-impl From<TaskError> for std::io::Error {
-
-    fn from(value: TaskError) -> std::io::Error {
-        std::io::Error::new(
-            std::io::ErrorKind::Other,
-            match value.kind {
-                TaskErrorKind::Cancelled => "task was cancelled",
-                TaskErrorKind::Panic => "task panicked",
-            },
-        )
-    }
-}
+pub use executor::Executor;
+pub use task_error::TaskError;
+pub use task_handle::TaskHandle;
 
 
 #[cfg(test)]
-mod tests {
+mod tests3 {
+    use std::{future::pending, sync::Arc, time::Duration};
     use super::*;
+    use tokio::{sync::{mpsc, oneshot}, time::sleep};
+
+
+    #[tokio::test]
+    async fn test_completed() {
+        let executor = Executor::new(());
+        let (tx, rx) = oneshot::channel();
+
+        let handle = executor.spawn(|_| Box::pin(async {
+            rx.await.unwrap();
+            42
+        }));
+
+        tx.send(()).unwrap();
+        assert_eq!(handle.await.unwrap(), 42);
+    }
+
+    #[tokio::test]
+    async fn test_finished_after_completion() {
+        let executor = Executor::new(());
+
+        let handle = executor.spawn(|_| Box::pin(async {
+            42
+        }));
+
+        executor.join().await;
+        assert_eq!(handle.await.unwrap(), 42);
+    }
+
+
+    #[tokio::test]
+    async fn test_cancel_queued_task() {
+        let executor = Executor::new(());
+        let (tx, rx) = oneshot::channel();
+
+        let running = executor.spawn(|_| Box::pin(async {
+            rx.await.unwrap();
+        }));
+        let handle = executor.spawn(|_| Box::pin(async {
+            42
+        }));
+
+        assert!(handle.cancel());
+        assert!(handle.await.unwrap_err().is_cancelled());
+
+        // The running task must not be affected by cancellation of the queued task.
+        tx.send(()).unwrap();
+        assert!(running.await.is_ok());
+    }
+
+
+    #[tokio::test]
+    async fn test_cancel_running_task_returns_false() {
+        let executor = Executor::new(());
+        let (tx, rx) = oneshot::channel();
+        let (tx2, rx2) = oneshot::channel();
+
+        let handle = executor.spawn(|_| Box::pin(async {
+            tx2.send(()).unwrap();
+            rx.await.unwrap();
+            42
+        }));
+
+        rx2.await.unwrap();
+        assert!(!handle.cancel());
+
+        tx.send(()).unwrap();
+        assert_eq!(handle.await.unwrap(), 42);
+    }
+
+    #[tokio::test]
+    async fn test_cancel_twice() {
+        let executor = Executor::new(());
+        let (tx, rx) = oneshot::channel();
+
+        let running = executor.spawn(|_| Box::pin(async {
+            rx.await.unwrap();
+        }));
+        let handle = executor.spawn(|_| Box::pin(async {
+            42
+        }));
+
+        assert!(handle.cancel());
+        assert!(!handle.cancel());
+
+        tx.send(()).unwrap();
+        assert!(handle.await.unwrap_err().is_cancelled());
+        assert!(running.await.is_ok());
+    }
+
+
+    #[tokio::test]
+    async fn test_executor_drop() {
+        let executor = Executor::new(());
+        let (tx, rx) = oneshot::channel();
+        let (tx2, rx2) = oneshot::channel();
+
+        let handle = executor.spawn(|_| Box::pin(async {
+            tx2.send(()).unwrap();
+            rx.await.unwrap();
+            42
+        }));
+
+        rx2.await.unwrap();
+
+        drop(executor);
+
+        assert!(!handle.cancel());
+
+        tx.send(()).unwrap();
+        assert!(handle.await.unwrap_err().is_cancelled());
+    }
+
+
+    #[tokio::test]
+    async fn test_task_panic() {
+        let executor = Executor::new(());
+
+        let handle = executor.spawn(|_| Box::pin(async {
+            panic!("task panic");
+        }));
+
+        assert!(handle.await.unwrap_err().is_panic());
+    }
+
+
+    #[tokio::test]
+    async fn test_prev_task_panic() {
+        let executor = Executor::new(());
+
+        let first = executor.spawn(|_| Box::pin(async {
+            panic!("first task panic");
+        }));
+
+        assert!(first.await.is_err());
+
+        let second = executor.spawn(|_| Box::pin(async {
+            42
+        }));
+
+        assert!(!second.cancel());
+        assert!(second.await.unwrap_err().is_panic());
+    }
+
+
+    #[tokio::test]
+    async fn test_is_finished_while_running() {
+        let executor = Executor::new(());
+        let (tx, rx) = oneshot::channel();
+        let (tx2, rx2) = oneshot::channel();
+
+        let handle = executor.spawn(|_| Box::pin(async {
+            tx2.send(()).unwrap();
+            rx.await.unwrap();
+        }));
+
+        rx2.await.unwrap();
+        tx.send(()).unwrap();
+        assert!(handle.await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_cancel_queued_task_does_not_run() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let executor = Executor::new(());
+        let (tx, rx) = oneshot::channel();
+
+        let running = executor.spawn(|_| Box::pin(async {
+            rx.await.unwrap();
+        }));
+
+        let executed = Arc::new(AtomicBool::new(false));
+        let executed_clone = executed.clone();
+
+        let handle = executor.spawn(move |_| Box::pin(async move {
+            executed_clone.store(true, Ordering::SeqCst);
+        }));
+
+        assert!(handle.cancel());
+        assert!(handle.await.unwrap_err().is_cancelled());
+
+        tx.send(()).unwrap();
+        running.await.unwrap();
+
+        assert!(!executed.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn test_panic_before_executor_drop() {
+        let executor = Executor::new(());
+
+        let handle = executor.spawn(|_| Box::pin(async {
+            panic!()
+        }));
+
+        let _ = executor.spawn(|_| Box::pin(async {})).await;
+
+        drop(executor);
+        let err = handle.await.unwrap_err();
+        assert!(err.is_panic());
+        assert!(!err.is_cancelled());
+    }
+
+    #[tokio::test]
+    async fn test_panic_after_executor_drop() {
+        let executor = Executor::new(());
+        let (tx, rx) = oneshot::channel();
+
+        let handle = executor.spawn(|_| Box::pin(async {
+            rx.await.unwrap();
+            panic!()
+        }));
+
+        drop(executor);
+        tx.send(()).unwrap();
+        let err = handle.await.unwrap_err();
+        assert!(!err.is_panic());
+        assert!(err.is_cancelled());
+    }
+
+    #[tokio::test]
+    async fn test_resolve_task_handle_after_cancel() {
+        let executor = Executor::new(());
+        let (tx, rx) = oneshot::channel();
+    
+        executor.spawn(move |_| Box::pin(async {
+            tx.send(()).unwrap();
+            pending::<()>().await;
+        }));
+
+        let handle = executor.spawn(move |_| Box::pin(async {}));
+
+        rx.await.unwrap();
+        handle.cancel();
+        let err = handle.await.unwrap_err();
+        assert!(err.is_cancelled());
+        assert!(!err.is_panic());
+    }
+
+    #[tokio::test]
+    async fn test_resolve_task_handle_after_executor_aborted() {
+        let executor = Executor::new(());
+        let (tx, rx) = oneshot::channel();
+
+        let handle1 = executor.spawn(move |_| Box::pin(async {
+            tx.send(()).unwrap();
+            pending::<()>().await;
+        }));
+        let handle2 = executor.spawn(move |_| Box::pin(async {}));
+
+        rx.await.unwrap();
+        drop(executor);
+
+        let err1 = handle1.await.unwrap_err();
+        assert!(err1.is_cancelled());
+        assert!(!err1.is_panic());
+        let err2 = handle2.await.unwrap_err();
+        assert!(err2.is_cancelled());
+        assert!(!err2.is_panic());
+    }
+
+    #[tokio::test]
+    async fn test_resolve_task_handle_after_executor_canncelled() {
+        let executor = Executor::new(Vec::new());
+        let (tx, rx) = oneshot::channel();
+        let (tx2, mut rx2) = mpsc::unbounded_channel();
+
+        let handle1 = executor.spawn(move |state| Box::pin(async move {
+            tx.send(()).unwrap();
+            while let Some(v) = rx2.recv().await {
+                state.push(v);
+            }
+            state.clone()
+        }));
+        let handle2 = executor.spawn(move |_| Box::pin(async {
+            pending::<()>().await;
+        }));
+
+        tx2.send(0).unwrap();
+        rx.await.unwrap();
+        
+        executor.cancel();
+
+        let err2 = handle2.await.unwrap_err();
+        assert!(err2.is_cancelled());
+        assert!(!err2.is_panic());
+
+        tx2.send(1).unwrap();
+        drop(tx2);
+
+        assert_eq!(handle1.await.unwrap(), vec![0, 1]);
+    }
+
+    #[tokio::test]
+    async fn test_cancel_join() {
+        let executor = Executor::new(());
+        let (tx, rx) = oneshot::channel();
+
+        let running = executor.spawn(move |_| Box::pin(async move {
+            tx.send(()).unwrap();
+            sleep(Duration::from_millis(500)).await;
+            "complete"
+        }));
+
+        let pending = executor.spawn(move |_| Box::pin(async move { }));
+
+        rx.await.unwrap();
+        executor.cancel_and_join().await;
+        assert_eq!(running.await.unwrap(), "complete");
+        assert!(pending.await.unwrap_err().is_cancelled());
+    }
+}
+
+#[cfg(test)]
+mod tests2 {
+    use tokio::sync::oneshot;
+    use super::*;
+
 
     #[tokio::test]
     async fn readme_example() {
@@ -730,7 +578,8 @@ mod tests {
 }
 
 #[cfg(test)]
-mod tests2 {
+mod tests {
+    use std::sync::Arc;
     use super::*;
 
     #[tokio::test]

@@ -9,7 +9,8 @@ This crate requires the `tokio` async runtime.
 # Usage
 
 ```rust
-async fn example() {
+#[tokio::main]
+async fn main() {
     let executor = async_sequential::Executor::new(Vec::new());
 
     executor.spawn(move |state: &mut Vec<u64>| Box::pin(async move {
