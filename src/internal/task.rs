@@ -49,7 +49,8 @@ where
     let panic_sender = TaskPanicSender::new(panic_tx);
     let task = Arc::new(OnceTake::new((task, panic_sender)));
     let controller = TaskController::new(Arc::downgrade(&task));
-    (Task { task }, TaskResultReceiver { result_rx, panic_rx }, controller)
+    let result = TaskResultReceiver::new(result_rx, panic_rx);
+    (Task { task }, result, controller)
 }
 
 
@@ -88,16 +89,33 @@ impl TaskPanicSender {
 pub struct TaskResultReceiver<R> {
     result_rx: oneshot::Receiver<R>,
     panic_rx: oneshot::Receiver<PanicPayload>,
+    panic_rx_completed: bool
+}
+
+impl<R> TaskResultReceiver<R> {
+
+    fn new(
+        result_rx: oneshot::Receiver<R>,
+        panic_rx: oneshot::Receiver<PanicPayload>,
+    ) -> Self {
+
+        Self { result_rx, panic_rx, panic_rx_completed: false }
+    }
 }
 
 impl<R> Future for TaskResultReceiver<R> {
     type Output = Result<R, Option<PanicPayload>>;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> std::task::Poll<Self::Output> {
-        if let Poll::Ready(Ok(panic)) = Pin::new(&mut self.panic_rx).poll(cx) {
-            return Poll::Ready(Err(Some(panic)));
+        if !self.panic_rx_completed {
+            if let Poll::Ready(poll) = Pin::new(&mut self.panic_rx).poll(cx) {
+                self.panic_rx_completed = true;
+                if let Ok(panic) = poll {
+                    return Poll::Ready(Err(Some(panic)));
+                }
+            }
         }
-
+        
         match Pin::new(&mut self.result_rx).poll(cx) {
             Poll::Ready(Ok(payload)) => Poll::Ready(Ok(payload)),
             Poll::Ready(Err(_)) => Poll::Ready(Err(None)),
