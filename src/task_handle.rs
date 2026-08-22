@@ -96,6 +96,52 @@ impl<R> TaskHandle<R> {
             },
         }
     }
+
+    /// Returns a [`TaskCanceller`] that can be used to cancel this task.
+    ///
+    /// The returned canceller has the same cancellation behavior as [`cancel`](TaskHandle::cancel).
+    /// It can be used independently of this handle, allowing cancellation to be
+    /// triggered from a different task or stored separately from the handle.
+    ///
+    /// # Examples
+    /// ```
+    /// # fn main() {
+    /// # tokio_test::block_on(async {
+    /// use std::time::Duration;
+    /// use tokio::time::sleep;
+    ///
+    /// let executor = async_sequential::Executor::new(());
+    ///
+    /// let handle = executor.spawn(move |_| Box::pin(async move {
+    ///     sleep(Duration::from_secs(1)).await;
+    /// }));
+    ///
+    /// let canceller = handle.canceller();
+    ///
+    /// assert!(canceller.cancel());
+    /// assert!(handle.await.unwrap_err().is_cancelled());
+    /// # });
+    /// # }
+    /// ```
+    pub fn canceller(&self) -> TaskCanceller {
+        match &self.repr {
+            TaskHandleRepr::PrevTaskPanic => TaskCanceller::noop(),
+            TaskHandleRepr::Active { task_controller, worker_flags, .. } => {
+                let task_controller = task_controller.clone();
+                let worker_flags = Arc::clone(worker_flags);
+
+                TaskCanceller::new(Arc::new(move || {
+                    let worker_flags = worker_flags.snapshot();
+                    if worker_flags.is_aborted() || worker_flags.is_cancelled() {
+                        false
+                    }
+                    else {
+                        task_controller.cancel()
+                    }
+                }))
+            },
+        }
+    }
 }
 
 impl<R> Future for TaskHandle<R> {

@@ -73,8 +73,9 @@ impl<R> Future for TaskResultReceiver<R> {
     }
 }
 
+#[derive(Clone)]
 pub struct TaskController {
-    repr: Box<dyn (Fn(TaskControllerReprRequest) -> bool) + Sync + Send + 'static>
+    repr: Arc<dyn (Fn(TaskControllerReprRequest) -> bool) + Sync + Send + 'static>
 }
 
 enum TaskControllerReprRequest {
@@ -86,7 +87,7 @@ impl TaskController {
 
     fn new<S: Send + 'static>(task: Weak<OnceTake<TaskRepr<S>>>) -> Self {
         let is_cancelled = AtomicBool::new(false);
-        let repr = Box::new(move |request: TaskControllerReprRequest| {
+        let repr = Arc::new(move |request: TaskControllerReprRequest| {
             match request {
                 TaskControllerReprRequest::CancelIfQueueing => {
                     let did_cancelled = task.upgrade().is_some_and(|task| task.take().is_some());

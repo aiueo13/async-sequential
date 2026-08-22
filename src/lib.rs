@@ -1,11 +1,13 @@
 mod internal;
 mod executor;
+mod task_canceller;
 mod task_error;
 mod task_handle;
 
 use internal::*;
 
 pub use executor::Executor;
+pub use task_canceller::TaskCanceller;
 pub use task_error::TaskError;
 pub use task_handle::TaskHandle;
 

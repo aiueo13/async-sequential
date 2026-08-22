@@ -17,7 +17,7 @@ impl<T> OnceTake<T> {
     }
 
     pub fn take(&self) -> Option<T> {
-        if self.taken.swap(true, Ordering::Relaxed) {
+        if self.taken.swap(true, Ordering::Acquire) {
             None
         } 
         else {
