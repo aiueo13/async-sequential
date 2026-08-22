@@ -157,7 +157,7 @@ impl<R> Future for TaskHandle<R> {
 
         match &mut self.repr {
             Repr::PrevTaskPanic { panic_msg } => {
-                Poll::Ready(Err(TaskError::prev_task_panicked(panic_msg.as_ref().map(Arc::clone))))
+                Poll::Ready(Err(TaskError::prev_task_panicked(panic_msg.take())))
             },
             Repr::Active { task_result, task_controller, worker_state } => {
                 match Pin::new(task_result).poll(cx) {

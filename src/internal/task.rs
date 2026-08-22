@@ -89,7 +89,7 @@ impl TaskPanicSender {
 pub struct TaskResultReceiver<R> {
     result_rx: oneshot::Receiver<R>,
     panic_rx: oneshot::Receiver<PanicPayload>,
-    panic_rx_completed: bool
+    panic_rx_finished: bool
 }
 
 impl<R> TaskResultReceiver<R> {
@@ -99,7 +99,7 @@ impl<R> TaskResultReceiver<R> {
         panic_rx: oneshot::Receiver<PanicPayload>,
     ) -> Self {
 
-        Self { result_rx, panic_rx, panic_rx_completed: false }
+        Self { result_rx, panic_rx, panic_rx_finished: false }
     }
 }
 
@@ -107,9 +107,9 @@ impl<R> Future for TaskResultReceiver<R> {
     type Output = Result<R, Option<PanicPayload>>;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> std::task::Poll<Self::Output> {
-        if !self.panic_rx_completed {
+        if !self.panic_rx_finished {
             if let Poll::Ready(poll) = Pin::new(&mut self.panic_rx).poll(cx) {
-                self.panic_rx_completed = true;
+                self.panic_rx_finished = true;
                 if let Ok(panic) = poll {
                     return Poll::Ready(Err(Some(panic)));
                 }
