@@ -1,7 +1,7 @@
-use std::sync::Arc;
+use std::{panic::{RefUnwindSafe, UnwindSafe}, sync::Arc};
 
 
-/// Handle for canceling a queued task.
+/// Handle for canceling a task.
 ///
 /// This can be obtained from [`TaskHandle::canceller`].
 /// It provides the same cancellation operation as [`TaskHandle::cancel`]
@@ -21,13 +21,13 @@ pub struct TaskCanceller {
 enum TaskCancellerRepr {
     Noop,
     Cancelable {
-        cancel: Arc<dyn (Fn() -> bool) + Sync + Send + 'static>
+        cancel: Arc<dyn (Fn() -> bool) + Sync + Send + RefUnwindSafe + UnwindSafe + 'static>
     }
 }
 
 impl TaskCanceller {
 
-    pub(crate) fn new(cancel: Arc<dyn (Fn() -> bool) + Sync + Send + 'static>) -> Self {
+    pub(crate) fn new(cancel: Arc<dyn (Fn() -> bool) + Sync + Send + RefUnwindSafe + UnwindSafe + 'static>) -> Self {
         Self { repr: TaskCancellerRepr::Cancelable { cancel } }
     }
 
@@ -38,17 +38,35 @@ impl TaskCanceller {
 
 impl TaskCanceller {
 
-    /// Cancels the task if it is neither finished **nor running**,
-    /// returning `true` if the task was canceled by this call.
+    /// Cancels the task if it is still queued,
+    /// returning `true` if the task was cancelled by this call.
     /// 
-    /// This method removes the task from the queue if it is still queued
-    /// and does not abort a running task to preserve the executor state invariant.
+    /// This method removes the task from the queue if it has not started running
+    /// and **does not abort a running task** to preserve the executor state invariant.
+    /// It does nothing if the task has already completed.
     /// 
-    /// This method is equivalent to [`TaskHandle::cancel`](crate::TaskHandle).
+    /// This method is equivalent to [`TaskHandle::cancel`](crate::TaskHandle::cancel).
     pub fn cancel(&self) -> bool {
         match &self.repr {
             TaskCancellerRepr::Noop => false,
             TaskCancellerRepr::Cancelable { cancel } => (cancel)(),
         }
+    }
+}
+
+
+#[cfg(test)]
+mod tests {
+    use crate::*;
+    use super::*;
+
+    fn require_refunwindsafe_unwindsafe<F: UnwindSafe + RefUnwindSafe>(_: F) {}
+
+    #[allow(unused)]
+    fn assert_cannceller_impl_refunwindsafe_unwindsafe() {
+        let executor = Executor::new(());
+        let task_handle = executor.spawn(|_| Box::pin(async {}));
+        let task_canceller = task_handle.canceller();
+        require_refunwindsafe_unwindsafe(task_canceller);
     }
 }

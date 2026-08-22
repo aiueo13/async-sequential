@@ -1,4 +1,5 @@
 use std::cell::UnsafeCell;
+use std::panic::{RefUnwindSafe, UnwindSafe};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 
@@ -28,8 +29,15 @@ impl<T> OnceTake<T> {
     }
 }
 
+impl<T> RefUnwindSafe for OnceTake<T> {}
+impl<T> UnwindSafe for OnceTake<T> {}
+
 // SAFETY:
-// `taken` を true に変更できたスレッドだけが `value` にアクセスする。
+// `taken` を true に変更できたスレッドだけが `value` にアクセスできる。
 // そのため、`value` が複数のスレッドから同時にアクセスされることはなく、
 // `T: Send` の場合に限り `OnceTake<T>` を複数スレッド間で共有できる。
 unsafe impl<T: Send> Sync for OnceTake<T> {}
+
+// SAFETY:
+// `taken` を true に変更できたスレッドだけが `value` を取得できる。
+unsafe impl<T: Send> Send for OnceTake<T> {}

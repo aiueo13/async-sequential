@@ -2,7 +2,7 @@ use crate::*;
 use std::{pin::Pin, sync::Arc, task::Poll};
 
 
-/// Handle for waiting for a queued task to complete.  
+/// Handle for waiting for a task to complete.
 ///
 /// Awaiting the handle returns the task's result if the task completes successfully,
 /// or a [`TaskError`] if the task could not complete.
@@ -11,37 +11,40 @@ pub struct TaskHandle<R> {
 }
 
 enum TaskHandleRepr<R> {
-    PrevTaskPanic,
+    PrevTaskPanic {
+        panic_msg: Option<Arc<String>>
+    },
     Active {
         task_result: TaskResultReceiver<R>,
         task_controller: TaskController,
-        worker_flags: Arc<WorkerFlags>,
+        worker_state: Arc<WorkerState>,
     }
 }
 
 impl<R> TaskHandle<R> {
 
-    pub(crate) fn prev_task_panicked() -> Self {
-        Self { repr: TaskHandleRepr::PrevTaskPanic }
+    pub(crate) fn prev_task_panicked(panic_msg: Option<Arc<String>>) -> Self {
+        Self { repr: TaskHandleRepr::PrevTaskPanic { panic_msg } }
     }
 
     pub(crate) fn new(
         task_result: TaskResultReceiver<R>,
         task_controller: TaskController,
-        worker_flags: Arc<WorkerFlags>,
+        worker_state: Arc<WorkerState>,
     ) -> Self {
 
-        Self { repr: TaskHandleRepr::Active { task_result, task_controller, worker_flags } }
+        Self { repr: TaskHandleRepr::Active { task_result, task_controller, worker_state } }
     }
 }
 
 impl<R> TaskHandle<R> {
 
-    /// Cancels the task if it is neither finished **nor running**,
-    /// returning `true` if the task was canceled by this call.
+    /// Cancels the task if it is still queued,
+    /// returning `true` if the task was cancelled by this call.
     /// 
-    /// This method removes the task from the queue if it is still queued
-    /// and does not abort a running task to preserve the executor state invariant.
+    /// This method removes the task from the queue if it has not started running
+    /// and **does not abort a running task** to preserve the executor state invariant.
+    /// It does nothing if the task has already completed.
     /// 
     /// # Examples
     /// ```
@@ -52,7 +55,7 @@ impl<R> TaskHandle<R> {
     /// 
     /// let executor = async_sequential::Executor::new(());
     /// 
-    /// // The task is not canceled
+    /// // The task is not cancelled
     /// // when the handle cancels it while it is running.
     /// let handle = executor.spawn(move |_| Box::pin(async move {
     ///     sleep(Duration::from_secs(2)).await;
@@ -61,7 +64,7 @@ impl<R> TaskHandle<R> {
     /// assert!(!handle.cancel());
     /// assert!(handle.await.is_ok());
     /// 
-    /// // The task is canceled
+    /// // The task is cancelled
     /// // when the handle cancels it before running.
     /// let _ = executor.spawn(move |_| Box::pin(async move {
     ///     sleep(Duration::from_secs(1)).await;
@@ -71,7 +74,7 @@ impl<R> TaskHandle<R> {
     /// assert!(handle.await.unwrap_err().is_cancelled());
     /// 
     /// // The task is cancelled but `cancel` returns false
-    /// // because the executor is dropped before `cancel` and abort it.
+    /// // because the executor is dropped before `cancel` is called and aborts the task.
     /// let handle = executor.spawn(move |_| Box::pin(async move {
     ///     sleep(Duration::from_secs(2)).await;
     /// }));
@@ -84,9 +87,9 @@ impl<R> TaskHandle<R> {
     /// ```
     pub fn cancel(&self) -> bool {
         match &self.repr {
-            TaskHandleRepr::PrevTaskPanic => false,
-            TaskHandleRepr::Active { task_controller, worker_flags, .. } => {
-                let worker_flags = worker_flags.snapshot();
+            TaskHandleRepr::PrevTaskPanic { .. } => false,
+            TaskHandleRepr::Active { task_controller, worker_state, .. } => {
+                let worker_flags = worker_state.flags();
                 if worker_flags.is_aborted() || worker_flags.is_cancelled() {
                     false
                 }
@@ -97,9 +100,9 @@ impl<R> TaskHandle<R> {
         }
     }
 
-    /// Returns a [`TaskCanceller`] that can be used to cancel this task.
+    /// Returns a [`TaskCanceller`] that can be used to cancel the task.
     ///
-    /// The returned canceller has the same cancellation behavior as [`cancel`](TaskHandle::cancel).
+    /// The returned canceller has the same cancellation behavior as [`cancel`](Self::cancel).
     /// It can be used independently of this handle, allowing cancellation to be
     /// triggered from a different task or stored separately from the handle.
     ///
@@ -125,13 +128,13 @@ impl<R> TaskHandle<R> {
     /// ```
     pub fn canceller(&self) -> TaskCanceller {
         match &self.repr {
-            TaskHandleRepr::PrevTaskPanic => TaskCanceller::noop(),
-            TaskHandleRepr::Active { task_controller, worker_flags, .. } => {
+            TaskHandleRepr::PrevTaskPanic { .. } => TaskCanceller::noop(),
+            TaskHandleRepr::Active { task_controller, worker_state, .. } => {
                 let task_controller = task_controller.clone();
-                let worker_flags = Arc::clone(worker_flags);
+                let worker_state = Arc::clone(worker_state);
 
                 TaskCanceller::new(Arc::new(move || {
-                    let worker_flags = worker_flags.snapshot();
+                    let worker_flags = worker_state.flags();
                     if worker_flags.is_aborted() || worker_flags.is_cancelled() {
                         false
                     }
@@ -153,28 +156,30 @@ impl<R> Future for TaskHandle<R> {
     ) -> Poll<Self::Output> {
 
         match &mut self.repr {
-            TaskHandleRepr::PrevTaskPanic => {
-                Poll::Ready(Err(TaskError::panicked()))
+            TaskHandleRepr::PrevTaskPanic { panic_msg } => {
+                Poll::Ready(Err(TaskError::prev_task_panicked(panic_msg.as_ref().map(Arc::clone))))
             },
-            TaskHandleRepr::Active { task_result, task_controller, worker_flags } => {
+            TaskHandleRepr::Active { task_result, task_controller, worker_state } => {
                 match Pin::new(task_result).poll(cx) {
                     Poll::Ready(result) => {
                         match result {
-                            Some(value) => Poll::Ready(Ok(value)),
-                            None => {
+                            Ok(value) => Poll::Ready(Ok(value)),
+                            Err(Some(panic)) => Poll::Ready(Err(TaskError::task_panicked(panic))),
+                            Err(None) => {
                                 if task_controller.is_cancelled() {
-                                    return Poll::Ready(Err(TaskError::cancelled()))
+                                    return Poll::Ready(Err(TaskError::task_cancelled()))
                                 }
 
-                                let worker_flags = worker_flags.snapshot();
+                                let worker_flags = worker_state.flags();
                                 if worker_flags.is_cancelled() {
-                                    Poll::Ready(Err(TaskError::cancelled()))
+                                    Poll::Ready(Err(TaskError::worker_cancelled()))
                                 }
                                 else if worker_flags.is_aborted() {
-                                    Poll::Ready(Err(TaskError::aborted()))
+                                    Poll::Ready(Err(TaskError::worker_aborted()))
                                 }
                                 else {
-                                    Poll::Ready(Err(TaskError::panicked()))
+                                    let panic_msg = worker_state.task_panic_msg();
+                                    Poll::Ready(Err(TaskError::prev_task_panicked(panic_msg)))
                                 }
                             },
                         }
@@ -184,9 +189,9 @@ impl<R> Future for TaskHandle<R> {
                         // 後続のタスクはキャンセルされない。
                         // そのため、ここでタスクをキャンセルしないと、後続のタスクが
                         // 実行中のタスクの完了まで解決されなくなってしまう。
-                        if worker_flags.snapshot().is_cancelled() {
+                        if worker_state.flags().is_cancelled() {
                             if task_controller.cancel() {
-                                return Poll::Ready(Err(TaskError::cancelled()));
+                                return Poll::Ready(Err(TaskError::worker_cancelled()));
                             }
                         }
 

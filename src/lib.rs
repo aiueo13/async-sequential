@@ -1,4 +1,5 @@
 mod internal;
+mod executor_join_error;
 mod executor;
 mod task_canceller;
 mod task_error;
@@ -6,6 +7,7 @@ mod task_handle;
 
 use internal::*;
 
+pub use executor_join_error::ExecutorJoinError;
 pub use executor::Executor;
 pub use task_canceller::TaskCanceller;
 pub use task_error::TaskError;
@@ -328,6 +330,136 @@ mod tests3 {
         assert_eq!(running.await.unwrap(), "complete");
         assert!(pending.await.unwrap_err().is_cancelled());
     }
+
+    #[tokio::test]
+    async fn test_task_panic_err_state() {
+        let executor = Executor::new(());
+
+        let handle = executor.spawn(move |_| Box::pin(async move {
+            panic!();
+        }));
+        let err = handle.await.unwrap_err();
+        assert!(err.is_panic());
+        assert!(err.is_task_panic());
+        assert!(!err.is_prev_task_panic());
+        assert!(!err.is_cancelled());
+
+        let handle = executor.spawn(move |_| Box::pin(async move {}));
+        let err = handle.await.unwrap_err();
+        assert!(err.is_panic());
+        assert!(err.is_prev_task_panic());
+        assert!(!err.is_task_panic());
+        assert!(!err.is_cancelled());
+    }
+
+    #[tokio::test]
+    async fn test_task_handle_cancel_err_state() {
+        let executor = Executor::new(());
+        let (tx, rx) = oneshot::channel();
+        let _ = executor.spawn(|_| Box::pin(async {
+            tx.send(()).unwrap();
+            pending::<()>().await;
+        }));
+        let pending = executor.spawn(|_| Box::pin(async {
+
+        }));
+        rx.await.unwrap();
+
+        pending.cancel();
+        drop(executor);
+
+        let err = pending.await.unwrap_err();
+        assert!(err.is_cancelled());
+        assert!(err.is_task_cancelled());
+        assert!(!err.is_worker_aborted());
+        assert!(!err.is_worker_cancelled());
+    }
+
+    #[tokio::test]
+    async fn test_task_canceller_cancel_err_state() {
+        let executor = Executor::new(());
+        let (tx, rx) = oneshot::channel();
+        let _ = executor.spawn(|_| Box::pin(async {
+            tx.send(()).unwrap();
+            pending::<()>().await;
+        }));
+        let pending = executor.spawn(|_| Box::pin(async {
+
+        }));
+        rx.await.unwrap();
+
+        pending.canceller().cancel();
+        drop(executor);
+
+        let err = pending.await.unwrap_err();
+        assert!(err.is_cancelled());
+        assert!(err.is_task_cancelled());
+        assert!(!err.is_worker_aborted());
+        assert!(!err.is_worker_cancelled());
+    }
+
+    #[tokio::test]
+    async fn test_worker_abort_err_state() {
+        let executor = Executor::new(());
+        let (tx, rx) = oneshot::channel();
+        let _ = executor.spawn(|_| Box::pin(async {
+            tx.send(()).unwrap();
+            pending::<()>().await;
+        }));
+        let pending = executor.spawn(|_| Box::pin(async {
+
+        }));
+        rx.await.unwrap();
+
+        drop(executor);
+        let err = pending.await.unwrap_err();
+        assert!(err.is_cancelled());
+        assert!(!err.is_task_cancelled());
+        assert!(err.is_worker_aborted());
+        assert!(!err.is_worker_cancelled());
+    }
+
+    #[tokio::test]
+    async fn test_worker_cancel_err_state() {
+        let executor = Executor::new(());
+        let (tx, rx) = oneshot::channel();
+        let _ = executor.spawn(|_| Box::pin(async {
+            tx.send(()).unwrap();
+            pending::<()>().await;
+        }));
+        let pending = executor.spawn(|_| Box::pin(async {
+
+        }));
+        rx.await.unwrap();
+
+        executor.cancel();
+        let err = pending.await.unwrap_err();
+        assert!(err.is_cancelled());
+        assert!(!err.is_task_cancelled());
+        assert!(!err.is_worker_aborted());
+        assert!(err.is_worker_cancelled());
+    }
+
+    #[tokio::test]
+    async fn test_panic_err_state_after_worker_cancel() {
+        let executor = Executor::new(());
+        let (tx, rx) = oneshot::channel();
+        let _ = executor.spawn(|_| Box::pin(async {
+            tx.send(()).unwrap();
+            panic!()
+        }));
+        let pending = executor.spawn(|_| Box::pin(async {
+
+        }));
+        rx.await.unwrap();
+
+        executor.cancel();
+        let err = pending.await.unwrap_err();
+        assert!(err.is_panic());
+        assert!(!err.is_task_panic());
+        assert!(err.is_prev_task_panic());
+        assert!(!err.is_cancelled());
+    }
 }
 
 #[cfg(test)]
@@ -446,8 +578,8 @@ mod tests2 {
         let executor = Executor::new(vec![0]);
         executor.spawn(|_| Box::pin(async { panic!() }));
         let r = executor.try_join().await;
-        assert!(r.as_ref().is_err_and(|e| e.is_panic()));
-        assert!(r.as_ref().is_err_and(|e| !e.is_cancelled()));
+        assert!(r.as_ref().is_err());
+        assert!(r.as_ref().is_err());
     }
 
     #[tokio::test]

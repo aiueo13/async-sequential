@@ -79,12 +79,11 @@ impl<S> Executor<S> {
         }
     }
 
-    /// Cancels all tasks that are neither finished **nor running**,
-    /// detaching the currently running task from the [`Executor`]
-    /// so that it can continue running.
-    ///
-    /// This method removes queued tasks from the executor
-    /// and does not abort the currently running task.
+    /// Cancels all queued tasks and detaches the currently running task
+    /// from the executor so that it can continue running.
+    /// 
+    /// This method removes tasks from the queue if they have not started running
+    /// and **does not abort a running task**.
     /// 
     /// # Examples
     /// ```
@@ -119,62 +118,62 @@ impl<S> Executor<S> {
         }
     }
 
-    /// Cancels all tasks that are neither finished **nor running**,
+    /// Cancels all queued tasks,
     /// waits for the currently running task to complete,
     /// and returns the final state.
     /// 
-    /// This method removes queued tasks from the [`Executor`]
-    /// and does not abort the currently running task to preserve the executor state invariant.
+    /// This method removes tasks from the queue if they have not started running
+    /// and **does not abort a running task** to preserve the executor state invariant.
     /// 
     /// # Panics
     /// Panics if any task panicked before or during this method,
     /// or if this method is called outside Tokio runtime.
     pub async fn cancel_and_join(self) -> S {
-        self.try_cancel_and_join().await.unwrap_or_else(|e| panic!("{e}"))
+        self.try_cancel_and_join().await.unwrap_or_else(|e| e.panic())
     }
 
-    /// Cancels all tasks that are neither finished **nor running**,
+    /// Cancels all queued tasks,
     /// waits for the currently running task to complete,
     /// and returns the final state.
     /// 
-    /// This method removes queued tasks from the [`Executor`]
-    /// and does not abort the currently running task to preserve the executor state invariant.
+    /// This method removes tasks from the queue if they have not started running
+    /// and **does not abort a running task** to preserve the executor state invariant.
     /// 
     /// # Errors
     /// Returns an error if any task panicked before or during this method.
     /// 
     /// # Panics
     /// Panics if this method is called outside Tokio runtime.
-    pub async fn try_cancel_and_join(self) -> Result<S, TaskError> {
+    pub async fn try_cancel_and_join(self) -> Result<S, ExecutorJoinError> {
         let worker = self.worker.lock().unwrap().take();
         match worker {
             Some(Worker::Unstarted { state }) => Ok(state),
-            Some(Worker::Started { worker_handle }) => worker_handle.cancel_and_join().await,
+            Some(Worker::Started { worker_handle }) => Ok(worker_handle.cancel_and_join().await?),
             None => unreachable!("illegal closed executor"),
         }
     }
 
-    /// Waits for all queued tasks to complete and returns the final state.
+    /// Waits for all tasks to complete and returns the final state.
     ///
     /// # Panics
     /// Panics if any task panicked before or during this method,
     /// or if this method is called outside Tokio runtime.
     pub async fn join(self) -> S {
-        self.try_join().await.unwrap_or_else(|e| panic!("{e}"))
+        self.try_join().await.unwrap_or_else(|e| e.panic())
     }
 
-    /// Waits for all queued tasks to complete and returns the final state.
+    /// Waits for all tasks to complete and returns the final state.
     ///
     /// # Errors
     /// Returns an error if any task panicked before or during this method.
     /// 
     /// # Panics
     /// Panics if this method is called outside Tokio runtime.
-    pub async fn try_join(self) -> Result<S, TaskError> {
+    pub async fn try_join(self) -> Result<S, ExecutorJoinError> {
         let worker = self.worker.lock().unwrap().take();
         match worker {
             Some(Worker::Unstarted { state }) => Ok(state),
-            Some(Worker::Started { worker_handle }) => worker_handle.join().await,
+            Some(Worker::Started { worker_handle }) => Ok(worker_handle.join().await?),
             None => unreachable!("illegal closed executor"),
         }
     }
@@ -209,7 +208,7 @@ impl<S: Send + 'static> Executor<S> {
         T: for<'a> FnOnce(&'a mut S) -> Pin<Box<dyn Future<Output = R> + Send + 'a>> + Send + 'static,
         R: Send + 'static,
     {
-        self.spawn(task).await.unwrap_or_else(|e| panic!("{e}"))
+        self.spawn(task).await.unwrap_or_else(|e| e.panic())
     }
 
     /// Queues a blocking task for sequential execution and waits for it to complete.
@@ -242,7 +241,7 @@ impl<S: Send + 'static> Executor<S> {
         T: (FnOnce(&mut S) -> R) + Send + 'static,
         R: Send + 'static,
     {
-        self.spawn_blocking(task).await.unwrap_or_else(|e| panic!("{e}"))
+        self.spawn_blocking(task).await.unwrap_or_else(|e| e.panic())
     }
 
     /// Queues an asynchronous task for sequential execution, 
@@ -276,8 +275,8 @@ impl<S: Send + 'static> Executor<S> {
     {
         let (task, task_result, task_controller) = build_async_task(task);
         match self.submit(task) {
-            Ok(worker_flags) => TaskHandle::new(task_result, task_controller, worker_flags),
-            Err(_) => TaskHandle::prev_task_panicked(),
+            Ok(worker_state) => TaskHandle::new(task_result, task_controller, worker_state),
+            Err(WorkerSendError::PrevTaskPanic { panic_msg }) => TaskHandle::prev_task_panicked(panic_msg),
         }
     }
 
@@ -318,20 +317,17 @@ impl<S: Send + 'static> Executor<S> {
     {
         let (task, task_result, task_controller) = build_blocking_task(task);
         match self.submit(task) {
-            Ok(worker_flags) => TaskHandle::new(task_result, task_controller, worker_flags),
-            Err(_) => TaskHandle::prev_task_panicked(),
+            Ok(worker_state) => TaskHandle::new(task_result, task_controller, worker_state),
+            Err(WorkerSendError::PrevTaskPanic { panic_msg }) => TaskHandle::prev_task_panicked(panic_msg),
         }
     }
 
 
-    fn submit(&self, task: Task<S>) -> Result<Arc<WorkerFlags>, ()> {
+    fn submit(&self, task: Task<S>) -> Result<Arc<WorkerState>, WorkerSendError> {
         let mut locked_worker = self.worker.lock().unwrap();
 
         if let Some(Worker::Started { ref worker_handle, .. }) = *locked_worker {
-            return match worker_handle.send(task) {
-                Ok(_) => Ok(worker_handle.flgas()),
-                Err(_) => Err(())
-            }
+            return worker_handle.send(task);
         }
 
         let Some(Worker::Unstarted { state }) = locked_worker.take() else {
@@ -339,9 +335,10 @@ impl<S: Send + 'static> Executor<S> {
         };
 
         let worker_handle = spawn_worker(state);
-        worker_handle.send(task).unwrap();
-        let worker_flags = worker_handle.flgas();
-
+        let worker_flags = match worker_handle.send(task) {
+            Ok(worker_flags) => worker_flags,
+            Err(WorkerSendError::PrevTaskPanic { .. }) => unreachable!(),
+        };
         *locked_worker = Some(Worker::Started { worker_handle });
         Ok(worker_flags)
     }
