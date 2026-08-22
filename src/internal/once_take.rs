@@ -22,10 +22,14 @@ impl<T> OnceTake<T> {
         } 
         else {
             // SAFETY:
-            // Only the thread for which `swap` returned `false` can access `value`.
+            // `taken` を true に変更できたスレッドだけが `value` にアクセスする。
             unsafe { (*self.value.get()).take() }
         }
     }
 }
 
+// SAFETY:
+// `taken` を true に変更できたスレッドだけが `value` にアクセスする。
+// そのため、`value` が複数のスレッドから同時にアクセスされることはなく、
+// `T: Send` の場合に限り `OnceTake<T>` を複数スレッド間で共有できる。
 unsafe impl<T: Send> Sync for OnceTake<T> {}
