@@ -335,12 +335,12 @@ impl<S: Send + 'static> Executor<S> {
         };
 
         let worker_handle = spawn_worker(state);
-        let worker_flags = match worker_handle.send(task) {
-            Ok(worker_flags) => worker_flags,
+        let worker_state = match worker_handle.send(task) {
+            Ok(worker_state) => worker_state,
             Err(WorkerSendError::PrevTaskPanic { .. }) => unreachable!(),
         };
         *locked_worker = Some(Worker::Started { worker_handle });
-        Ok(worker_flags)
+        Ok(worker_state)
     }
 }
 
