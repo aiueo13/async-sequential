@@ -117,8 +117,8 @@ impl WorkerFlags {
         }
     }
 
-    pub fn snapshot(&self) -> WorkerStateFlagsSnapshot {
-        WorkerStateFlagsSnapshot { flags: self.get_flags() }
+    pub fn snapshot(&self) -> WorkerFlagsSnapshot {
+        WorkerFlagsSnapshot { flags: self.get_flags() }
     }
 
     const FLAG_ABORTED: u8 = 0b0000_0001;
@@ -141,11 +141,11 @@ impl WorkerFlags {
     }
 }
 
-pub struct WorkerStateFlagsSnapshot {
+pub struct WorkerFlagsSnapshot {
     flags: u8
 }
 
-impl WorkerStateFlagsSnapshot {
+impl WorkerFlagsSnapshot {
     
     pub fn is_cancelled(&self) -> bool {
         self.flags & WorkerFlags::FLAG_CANCELLED != 0
