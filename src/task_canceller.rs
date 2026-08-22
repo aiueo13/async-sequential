@@ -14,13 +14,13 @@ use std::{panic::{RefUnwindSafe, UnwindSafe}, sync::Arc};
 /// [`TaskHandle::canceller`]: crate::TaskHandle::canceller
 #[derive(Clone)]
 pub struct TaskCanceller {
-    repr: TaskCancellerRepr
+    repr: Repr
 }
 
 #[derive(Clone)]
-enum TaskCancellerRepr {
-    Noop,
-    Cancelable {
+enum Repr {
+    Inactive,
+    Active {
         cancel: Arc<dyn (Fn() -> bool) + Sync + Send + RefUnwindSafe + UnwindSafe + 'static>
     }
 }
@@ -28,11 +28,11 @@ enum TaskCancellerRepr {
 impl TaskCanceller {
 
     pub(crate) fn new(cancel: Arc<dyn (Fn() -> bool) + Sync + Send + RefUnwindSafe + UnwindSafe + 'static>) -> Self {
-        Self { repr: TaskCancellerRepr::Cancelable { cancel } }
+        Self { repr: Repr::Active { cancel } }
     }
 
-    pub(crate) fn noop() -> Self {
-        Self { repr: TaskCancellerRepr::Noop }
+    pub(crate) fn inactive() -> Self {
+        Self { repr: Repr::Inactive }
     }
 }
 
@@ -48,8 +48,8 @@ impl TaskCanceller {
     /// This method is equivalent to [`TaskHandle::cancel`](crate::TaskHandle::cancel).
     pub fn cancel(&self) -> bool {
         match &self.repr {
-            TaskCancellerRepr::Noop => false,
-            TaskCancellerRepr::Cancelable { cancel } => (cancel)(),
+            Repr::Inactive => false,
+            Repr::Active { cancel } => (cancel)(),
         }
     }
 }

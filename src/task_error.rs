@@ -4,10 +4,10 @@ use std::{any::Any, fmt, sync::Arc};
 
 /// Error that occurred while waiting for a task to complete.
 pub struct TaskError {
-    repr: TaskErrorRepr,
+    repr: Repr,
 }
 
-enum TaskErrorRepr {
+enum Repr {
     WorkerAborted,
     WorkerCancelled,
     TaskCancelled,
@@ -22,32 +22,32 @@ enum TaskErrorRepr {
 impl TaskError {
 
     pub(crate) fn task_panicked(panic: PanicPayload) -> Self {
-        Self { repr: TaskErrorRepr::TaskPanic { panic } }
+        Self { repr: Repr::TaskPanic { panic } }
     }
 
     pub(crate) fn prev_task_panicked(panic_msg: Option<Arc<String>>) -> Self {
-        Self { repr: TaskErrorRepr::PrevTaskPanic { panic_msg } }
+        Self { repr: Repr::PrevTaskPanic { panic_msg } }
     }
 
     pub(crate) fn worker_aborted() -> Self {
-        Self { repr: TaskErrorRepr::WorkerAborted }
+        Self { repr: Repr::WorkerAborted }
     }
 
     pub(crate) fn worker_cancelled() -> Self {
-        Self { repr: TaskErrorRepr::WorkerCancelled }
+        Self { repr: Repr::WorkerCancelled }
     }
 
     pub(crate) fn task_cancelled() -> Self {
-        Self { repr: TaskErrorRepr::TaskCancelled }
+        Self { repr: Repr::TaskCancelled }
     }
 
     pub(crate) fn panic(self) -> ! {
         match self.repr {
-            TaskErrorRepr::WorkerAborted => panic!("worker was aborted"),
-            TaskErrorRepr::WorkerCancelled => panic!("worker was cancelled"),
-            TaskErrorRepr::TaskCancelled => panic!("task was cancelled"),
-            TaskErrorRepr::TaskPanic { panic } => panic.resume_unwind(),
-            TaskErrorRepr::PrevTaskPanic { panic_msg } => {
+            Repr::WorkerAborted => panic!("worker was aborted"),
+            Repr::WorkerCancelled => panic!("worker was cancelled"),
+            Repr::TaskCancelled => panic!("task was cancelled"),
+            Repr::TaskPanic { panic } => panic.resume_unwind(),
+            Repr::PrevTaskPanic { panic_msg } => {
                 match panic_msg {
                     Some(panic_msg) => panic!("previous task panicked: {panic_msg}"),
                     None => panic!("previous task panicked"),
@@ -155,43 +155,64 @@ impl TaskError {
         self.is_task_panic() || self.is_prev_task_panic()
     }
 
-    /// Attempts to extract the original panic payload from the error.
+    /// Extracts the original panic payload
+    /// if the error was caused by the task itself panicking.
     ///
-    /// Returns `Ok` if the error was caused by the task itself panicking.
-    /// The returned payload is the original panic payload and can be passed to
+    /// The returned panic payload can be passed to
     /// [`std::panic::resume_unwind`] to resume the original panic.
     ///
-    /// Returns `Err` with the original error if the error was not caused by the
-    /// task itself panicking. In particular, the panic payload cannot be retrieved
-    /// when the error was caused by a previous task panicking.
+    /// # Panics
+    /// Panics if the error was not caused by the task itself panicking.
+    /// In particular, the panic payload cannot be retrieved
+    /// if the error was caused by a previous task panicking.
+    pub fn into_panic(self) -> Box<dyn Any + Send + 'static> {
+        match self.repr {
+            Repr::WorkerAborted => panic!("cannot extract panic payload: worker was aborted"),
+            Repr::WorkerCancelled => panic!("cannot extract panic payload: worker was cancelled"),
+            Repr::TaskCancelled => panic!("cannot extract panic payload: task was cancelled"),
+            Repr::TaskPanic { panic } => panic.into_inner(),
+            Repr::PrevTaskPanic { .. } => panic!("cannot extract panic payload: a previous task panicked"),
+        }
+    }
+
+    /// Attempts to extract the original panic payload
+    /// if the error was caused by the task itself panicking.
+    ///
+    /// The returned panic payload can be passed to
+    /// [`std::panic::resume_unwind`] to resume the original panic.
+    ///
+    /// # Errors
+    /// Returns the original error if it was not caused by the task itself panicking.
+    /// In particular, the panic payload cannot be retrieved
+    /// if the error was caused by a previous task panicking.
     pub fn try_into_panic(self) -> Result<Box<dyn Any + Send + 'static>, Self> {
         match self.repr {
-            TaskErrorRepr::WorkerAborted => Err(self),
-            TaskErrorRepr::WorkerCancelled => Err(self),
-            TaskErrorRepr::TaskCancelled => Err(self),
-            TaskErrorRepr::TaskPanic { panic } => Ok(panic.into_inner()),
-            TaskErrorRepr::PrevTaskPanic { .. } => Err(self),
+            Repr::WorkerAborted => Err(self),
+            Repr::WorkerCancelled => Err(self),
+            Repr::TaskCancelled => Err(self),
+            Repr::TaskPanic { panic } => Ok(panic.into_inner()),
+            Repr::PrevTaskPanic { .. } => Err(self),
         }
     }
 
     /// Returns `true` if the error was caused by the task panicking.
     pub fn is_task_panic(&self) -> bool {
-        matches!(&self.repr, TaskErrorRepr::TaskPanic { .. })
+        matches!(&self.repr, Repr::TaskPanic { .. })
     }
 
     /// Returns `true` if the error was caused by any previous task panicking.
     pub fn is_prev_task_panic(&self) -> bool {
-        matches!(&self.repr, TaskErrorRepr::PrevTaskPanic { .. })
+        matches!(&self.repr, Repr::PrevTaskPanic { .. })
     }
 
     /// Returns `true` if the error was caused by the executor being dropped.
     pub fn is_worker_aborted(&self) -> bool {
-        matches!(&self.repr, TaskErrorRepr::WorkerAborted)
+        matches!(&self.repr, Repr::WorkerAborted)
     }
 
     /// Returns `true` if the error was caused by the worker being cancelled.
     pub fn is_worker_cancelled(&self) -> bool {
-        matches!(&self.repr, TaskErrorRepr::WorkerCancelled)
+        matches!(&self.repr, Repr::WorkerCancelled)
     }
 
     /// Returns `true` if the error was caused by the task being cancelled in any of the following ways:
@@ -199,7 +220,7 @@ impl TaskError {
     /// - [`TaskHandle::cancel`](crate::TaskHandle::cancel)
     /// - [`TaskCanceller::cancel`](crate::TaskCanceller::cancel)
     pub fn is_task_cancelled(&self) -> bool {
-        matches!(&self.repr, TaskErrorRepr::TaskCancelled)
+        matches!(&self.repr, Repr::TaskCancelled)
     }
 }
 
@@ -207,15 +228,15 @@ impl fmt::Debug for TaskError {
 
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match &self.repr {
-            TaskErrorRepr::WorkerAborted => f.write_str("TaskError::WorkerAborted"),
-            TaskErrorRepr::WorkerCancelled => f.write_str("TaskError::WorkerCancelled"),
-            TaskErrorRepr::TaskCancelled => f.write_str("TaskError::TaskCancelled"),
-            TaskErrorRepr::PrevTaskPanic { panic_msg } => {
+            Repr::WorkerAborted => f.write_str("TaskError::WorkerAborted"),
+            Repr::WorkerCancelled => f.write_str("TaskError::WorkerCancelled"),
+            Repr::TaskCancelled => f.write_str("TaskError::TaskCancelled"),
+            Repr::PrevTaskPanic { panic_msg } => {
                 f.debug_struct("TaskError::PreviousTaskPanic")
                     .field("panic_msg", panic_msg)
                     .finish()
             }
-            TaskErrorRepr::TaskPanic { panic } => {
+            Repr::TaskPanic { panic } => {
                 f.debug_struct("TaskError::TaskPanic")
                     .field("panic_msg", &panic.as_str())
                     .finish()
@@ -228,16 +249,16 @@ impl fmt::Display for TaskError {
 
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match &self.repr {
-            TaskErrorRepr::WorkerAborted => f.write_str("worker was aborted"),
-            TaskErrorRepr::WorkerCancelled => f.write_str("worker was cancelled"),
-            TaskErrorRepr::TaskCancelled => f.write_str("task was cancelled"),
-            TaskErrorRepr::PrevTaskPanic { panic_msg } => {
+            Repr::WorkerAborted => f.write_str("worker was aborted"),
+            Repr::WorkerCancelled => f.write_str("worker was cancelled"),
+            Repr::TaskCancelled => f.write_str("task was cancelled"),
+            Repr::PrevTaskPanic { panic_msg } => {
                 match panic_msg {
                     Some(msg) => write!(f, "previous task panicked: {msg}"),
                     None => f.write_str("previous task panicked"),
                 }
             }
-            TaskErrorRepr::TaskPanic { panic } => {
+            Repr::TaskPanic { panic } => {
                 match panic.as_str() {
                     Some(msg) => write!(f, "task panicked: {msg}"),
                     None => f.write_str("task panicked"),
@@ -253,11 +274,11 @@ impl From<TaskError> for std::io::Error {
 
     fn from(value: TaskError) -> std::io::Error {
         let error = match &value.repr {
-            TaskErrorRepr::WorkerCancelled => "worker was cancelled",
-            TaskErrorRepr::WorkerAborted => "worker was aborted",
-            TaskErrorRepr::TaskCancelled => "task was cancelled",
-            TaskErrorRepr::PrevTaskPanic { .. } => "previous task panicked",
-            TaskErrorRepr::TaskPanic { .. } => "task panicked",
+            Repr::WorkerCancelled => "worker was cancelled",
+            Repr::WorkerAborted => "worker was aborted",
+            Repr::TaskCancelled => "task was cancelled",
+            Repr::PrevTaskPanic { .. } => "previous task panicked",
+            Repr::TaskPanic { .. } => "task panicked",
         };
 
         std::io::Error::new(std::io::ErrorKind::Other, error)

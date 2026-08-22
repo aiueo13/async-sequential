@@ -7,10 +7,10 @@ use std::{pin::Pin, sync::Arc, task::Poll};
 /// Awaiting the handle returns the task's result if the task completes successfully,
 /// or a [`TaskError`] if the task could not complete.
 pub struct TaskHandle<R> {
-    repr: TaskHandleRepr<R>,
+    repr: Repr<R>,
 }
 
-enum TaskHandleRepr<R> {
+enum Repr<R> {
     PrevTaskPanic {
         panic_msg: Option<Arc<String>>
     },
@@ -24,7 +24,7 @@ enum TaskHandleRepr<R> {
 impl<R> TaskHandle<R> {
 
     pub(crate) fn prev_task_panicked(panic_msg: Option<Arc<String>>) -> Self {
-        Self { repr: TaskHandleRepr::PrevTaskPanic { panic_msg } }
+        Self { repr: Repr::PrevTaskPanic { panic_msg } }
     }
 
     pub(crate) fn new(
@@ -33,7 +33,7 @@ impl<R> TaskHandle<R> {
         worker_state: Arc<WorkerState>,
     ) -> Self {
 
-        Self { repr: TaskHandleRepr::Active { task_result, task_controller, worker_state } }
+        Self { repr: Repr::Active { task_result, task_controller, worker_state } }
     }
 }
 
@@ -87,8 +87,8 @@ impl<R> TaskHandle<R> {
     /// ```
     pub fn cancel(&self) -> bool {
         match &self.repr {
-            TaskHandleRepr::PrevTaskPanic { .. } => false,
-            TaskHandleRepr::Active { task_controller, worker_state, .. } => {
+            Repr::PrevTaskPanic { .. } => false,
+            Repr::Active { task_controller, worker_state, .. } => {
                 let worker_flags = worker_state.flags();
                 if worker_flags.is_aborted() || worker_flags.is_cancelled() {
                     false
@@ -128,8 +128,8 @@ impl<R> TaskHandle<R> {
     /// ```
     pub fn canceller(&self) -> TaskCanceller {
         match &self.repr {
-            TaskHandleRepr::PrevTaskPanic { .. } => TaskCanceller::noop(),
-            TaskHandleRepr::Active { task_controller, worker_state, .. } => {
+            Repr::PrevTaskPanic { .. } => TaskCanceller::inactive(),
+            Repr::Active { task_controller, worker_state, .. } => {
                 let task_controller = task_controller.clone();
                 let worker_state = Arc::clone(worker_state);
 
@@ -156,10 +156,10 @@ impl<R> Future for TaskHandle<R> {
     ) -> Poll<Self::Output> {
 
         match &mut self.repr {
-            TaskHandleRepr::PrevTaskPanic { panic_msg } => {
+            Repr::PrevTaskPanic { panic_msg } => {
                 Poll::Ready(Err(TaskError::prev_task_panicked(panic_msg.as_ref().map(Arc::clone))))
             },
-            TaskHandleRepr::Active { task_result, task_controller, worker_state } => {
+            Repr::Active { task_result, task_controller, worker_state } => {
                 match Pin::new(task_result).poll(cx) {
                     Poll::Ready(result) => {
                         match result {
