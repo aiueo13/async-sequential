@@ -15,7 +15,7 @@ enum TaskHandleRepr<R> {
     Active {
         task_result: TaskResultReceiver<R>,
         task_controller: TaskController,
-        worker_state: Arc<WorkerState>,
+        worker_flags: Arc<WorkerFlags>,
     }
 }
 
@@ -28,10 +28,10 @@ impl<R> TaskHandle<R> {
     pub(crate) fn new(
         task_result: TaskResultReceiver<R>,
         task_controller: TaskController,
-        worker_state: Arc<WorkerState>,
+        worker_flags: Arc<WorkerFlags>,
     ) -> Self {
 
-        Self { repr: TaskHandleRepr::Active { task_result, task_controller, worker_state } }
+        Self { repr: TaskHandleRepr::Active { task_result, task_controller, worker_flags } }
     }
 }
 
@@ -85,8 +85,9 @@ impl<R> TaskHandle<R> {
     pub fn cancel(&self) -> bool {
         match &self.repr {
             TaskHandleRepr::PrevTaskPanic => false,
-            TaskHandleRepr::Active { task_controller, worker_state, .. } => {
-                if worker_state.is_aborted_or_cancelled() {
+            TaskHandleRepr::Active { task_controller, worker_flags, .. } => {
+                let worker_flags = worker_flags.snapshot();
+                if worker_flags.is_aborted() || worker_flags.is_cancelled() {
                     false
                 }
                 else {
@@ -109,14 +110,22 @@ impl<R> Future for TaskHandle<R> {
             TaskHandleRepr::PrevTaskPanic => {
                 Poll::Ready(Err(TaskError::panicked()))
             },
-            TaskHandleRepr::Active { task_result, task_controller, worker_state } => {
+            TaskHandleRepr::Active { task_result, task_controller, worker_flags } => {
                 match Pin::new(task_result).poll(cx) {
                     Poll::Ready(result) => {
                         match result {
                             Some(value) => Poll::Ready(Ok(value)),
                             None => {
-                                if task_controller.is_cancelled() || worker_state.is_aborted_or_cancelled() {
+                                if task_controller.is_cancelled() {
+                                    return Poll::Ready(Err(TaskError::cancelled()))
+                                }
+
+                                let worker_flags = worker_flags.snapshot();
+                                if worker_flags.is_cancelled() {
                                     Poll::Ready(Err(TaskError::cancelled()))
+                                }
+                                else if worker_flags.is_aborted() {
+                                    Poll::Ready(Err(TaskError::aborted()))
                                 }
                                 else {
                                     Poll::Ready(Err(TaskError::panicked()))
@@ -129,7 +138,7 @@ impl<R> Future for TaskHandle<R> {
                         // 後続のタスクはキャンセルされない。
                         // そのため、ここでタスクをキャンセルしないと、後続のタスクが
                         // 実行中のタスクの完了まで解決されなくなってしまう。
-                        if worker_state.is_cancelled() {
+                        if worker_flags.snapshot().is_cancelled() {
                             if task_controller.cancel() {
                                 return Poll::Ready(Err(TaskError::cancelled()));
                             }

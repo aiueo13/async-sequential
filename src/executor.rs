@@ -276,7 +276,7 @@ impl<S: Send + 'static> Executor<S> {
     {
         let (task, task_result, task_controller) = build_async_task(task);
         match self.submit(task) {
-            Ok(worker_state) => TaskHandle::new(task_result, task_controller, worker_state),
+            Ok(worker_flags) => TaskHandle::new(task_result, task_controller, worker_flags),
             Err(_) => TaskHandle::prev_task_panicked(),
         }
     }
@@ -318,18 +318,18 @@ impl<S: Send + 'static> Executor<S> {
     {
         let (task, task_result, task_controller) = build_blocking_task(task);
         match self.submit(task) {
-            Ok(worker_state) => TaskHandle::new(task_result, task_controller, worker_state),
+            Ok(worker_flags) => TaskHandle::new(task_result, task_controller, worker_flags),
             Err(_) => TaskHandle::prev_task_panicked(),
         }
     }
 
 
-    fn submit(&self, task: Task<S>) -> Result<Arc<WorkerState>, ()> {
+    fn submit(&self, task: Task<S>) -> Result<Arc<WorkerFlags>, ()> {
         let mut locked_worker = self.worker.lock().unwrap();
 
         if let Some(Worker::Started { ref worker_handle, .. }) = *locked_worker {
             return match worker_handle.send(task) {
-                Ok(_) => Ok(worker_handle.state()),
+                Ok(_) => Ok(worker_handle.flgas()),
                 Err(_) => Err(())
             }
         }
@@ -340,10 +340,10 @@ impl<S: Send + 'static> Executor<S> {
 
         let worker_handle = spawn_worker(state);
         worker_handle.send(task).unwrap();
-        let worker_state = worker_handle.state();
+        let worker_flags = worker_handle.flgas();
 
         *locked_worker = Some(Worker::Started { worker_handle });
-        Ok(worker_state)
+        Ok(worker_flags)
     }
 }
 

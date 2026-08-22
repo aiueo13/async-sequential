@@ -4,14 +4,13 @@ use tokio::{spawn, sync::mpsc, task::{JoinHandle as SpawnJoinHandle, spawn_block
 
 
 pub fn spawn_worker<S: Send + 'static>(mut state: S) -> WorkerHandle<S> {
-    let worker_state = Arc::new(WorkerState::new());
     let (task_tx, mut task_rx) = mpsc::unbounded_channel::<Task<S>>();
-
-    let handle = {
-        let worker_state = Arc::clone(&worker_state);
+    let worker_flags = Arc::new(WorkerFlags::new());
+    let worker_handle = {
+        let worker_flags = Arc::clone(&worker_flags);
         spawn(async move {
             while let Some(task) = task_rx.recv().await {
-                if worker_state.is_cancelled() {
+                if worker_flags.snapshot().is_cancelled() {
                     break;
                 }
 
@@ -30,19 +29,19 @@ pub fn spawn_worker<S: Send + 'static>(mut state: S) -> WorkerHandle<S> {
         })
     };
 
-    WorkerHandle { handle, state: worker_state, task_tx }
+    WorkerHandle { worker_handle, worker_flags, task_tx }
 }
 
 pub struct WorkerHandle<S> {
-    handle: SpawnJoinHandle<S>,
+    worker_handle: SpawnJoinHandle<S>,
+    worker_flags: Arc<WorkerFlags>,
     task_tx: mpsc::UnboundedSender<Task<S>>,
-    state: Arc<WorkerState>
 }
 
 impl<S> WorkerHandle<S> {
 
-    pub fn state(&self) -> Arc<WorkerState> {
-        Arc::clone(&self.state)
+    pub fn flgas(&self) -> Arc<WorkerFlags> {
+        Arc::clone(&self.worker_flags)
     }
 
     pub fn send(&self, task: Task<S>) -> Result<(), ()> {
@@ -50,30 +49,34 @@ impl<S> WorkerHandle<S> {
     }
 
     pub fn abort(self) {
-        if !self.handle.is_finished() {
-            self.state.set_aborted();
-            self.handle.abort();
+        if !self.worker_handle.is_finished() {
+            self.worker_flags.set_aborted();
+            self.worker_handle.abort();
         }
     }
 
     pub fn cancel(self) {
-        if !self.handle.is_finished() {
-            self.state.set_cancelled();
+        if !self.worker_handle.is_finished() {
+            self.worker_flags.set_cancelled();
             drop(self.task_tx);
         }
     }
     
     pub async fn cancel_and_join(self) -> Result<S, TaskError> {
-        if !self.handle.is_finished() {
-            self.state.set_cancelled();
+        if !self.worker_handle.is_finished() {
+            self.worker_flags.set_cancelled();
             drop(self.task_tx);
         }
 
-        match self.handle.await {
+        match self.worker_handle.await {
             Ok(state) => Ok(state),
             Err(_) => {
-                if self.state.is_aborted_or_cancelled() {
+                let worker_flags = self.worker_flags.snapshot();
+                if worker_flags.is_cancelled() {
                     Err(TaskError::cancelled())
+                }
+                else if worker_flags.is_aborted() {
+                    Err(TaskError::aborted())
                 }
                 else {
                     Err(TaskError::panicked())
@@ -84,11 +87,15 @@ impl<S> WorkerHandle<S> {
 
     pub async fn join(self) -> Result<S, TaskError> {
         drop(self.task_tx);
-        match self.handle.await {
+        match self.worker_handle.await {
             Ok(state) => Ok(state),
             Err(_) => {
-                if self.state.is_aborted_or_cancelled() {
+                let worker_flags = self.worker_flags.snapshot();
+                if worker_flags.is_cancelled() {
                     Err(TaskError::cancelled())
+                }
+                else if worker_flags.is_aborted() {
+                    Err(TaskError::aborted())
                 }
                 else {
                     Err(TaskError::panicked())
@@ -98,31 +105,24 @@ impl<S> WorkerHandle<S> {
     }
 }
 
-pub struct WorkerState {
+pub struct WorkerFlags {
     flags: AtomicU8,
 }
 
-impl WorkerState {
+impl WorkerFlags {
 
     pub fn new() -> Self {
         Self {
             flags: AtomicU8::new(0),
         }
     }
-    
+
+    pub fn snapshot(&self) -> WorkerStateFlagsSnapshot {
+        WorkerStateFlagsSnapshot { flags: self.get_flags() }
+    }
 
     const FLAG_ABORTED: u8 = 0b0000_0001;
     const FLAG_CANCELLED: u8 = 0b0000_0010;
-
-    pub fn is_aborted_or_cancelled(&self) -> bool {
-        let flags = self.get_flags();
-        (flags & (Self::FLAG_ABORTED | Self::FLAG_CANCELLED)) != 0
-    }
-
-    pub fn is_cancelled(&self) -> bool {
-        self.get_flags() & Self::FLAG_CANCELLED != 0
-    }
-
     
     fn set_aborted(&self) {
         self.set_flag(Self::FLAG_ABORTED);
@@ -138,5 +138,20 @@ impl WorkerState {
 
     fn get_flags(&self) -> u8 {
         self.flags.load(Ordering::Acquire)
+    }
+}
+
+pub struct WorkerStateFlagsSnapshot {
+    flags: u8
+}
+
+impl WorkerStateFlagsSnapshot {
+    
+    pub fn is_cancelled(&self) -> bool {
+        self.flags & WorkerFlags::FLAG_CANCELLED != 0
+    }
+
+    pub fn is_aborted(&self) -> bool {
+        self.flags & WorkerFlags::FLAG_ABORTED != 0
     }
 }

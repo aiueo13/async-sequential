@@ -20,6 +20,10 @@ impl TaskError {
     pub(crate) fn cancelled() -> Self {
         Self { repr: TaskErrorRepr::Cancelled }
     }
+
+    pub(crate) fn aborted() -> Self {
+        Self { repr: TaskErrorRepr::Cancelled }
+    }
 }
 
 impl TaskError {
