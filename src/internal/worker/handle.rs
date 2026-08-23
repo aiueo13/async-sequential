@@ -1,9 +1,10 @@
 use crate::*;
-use std::{borrow::Cow, panic, sync::{Arc, OnceLock, atomic::{AtomicU8, Ordering}}};
+use super::*;
+use std::{panic, sync::Arc};
 use tokio::{spawn, sync::{mpsc, watch}, task::{AbortHandle, JoinHandle, spawn_blocking}};
 
 
-pub fn spawn_worker<S: Send + 'static>(mut state: S) -> WorkerHandle<S> {
+pub(super) fn spawn_worker<S: Send + 'static>(mut state: S) -> WorkerHandle<S> {
     let worker_state = Arc::new(WorkerState::new());
     let (task_tx, mut task_rx) = mpsc::unbounded_channel::<Task<S>>();
     let (panic_sender_tx, mut panic_sender_rx) = watch::channel(None);
@@ -59,7 +60,7 @@ pub fn spawn_worker<S: Send + 'static>(mut state: S) -> WorkerHandle<S> {
                     else {
                         if let Some(panic) = e.try_into_panic().ok() {
                             let panic = PanicPayload::new(panic);
-                            task_panic_msg = panic.as_str().map(|s| s.to_string());
+                            task_panic_msg = panic.msg().map(|s| s.to_string());
 
                             let panic_sender = panic_sender_rx.borrow_and_update();
                             let panic_sender = panic_sender.as_ref();
@@ -74,7 +75,7 @@ pub fn spawn_worker<S: Send + 'static>(mut state: S) -> WorkerHandle<S> {
                         }
                     };
 
-                    let _ = worker_state.task_panic_msg.set(task_panic_msg.map(Arc::new));
+                    let _ = worker_state.set_task_panic_msg(task_panic_msg.map(Arc::new));
                     Err(err)
                 },
             }
@@ -84,7 +85,7 @@ pub fn spawn_worker<S: Send + 'static>(mut state: S) -> WorkerHandle<S> {
     WorkerHandle { worker_handle, join_handle, worker_state, task_tx }
 }
 
-pub struct WorkerHandle<S> {
+pub(super) struct WorkerHandle<S> {
     worker_handle: AbortHandle,
     join_handle: JoinHandle<Result<S, WorkerJoinError>>,
     worker_state: Arc<WorkerState>,
@@ -93,40 +94,45 @@ pub struct WorkerHandle<S> {
 
 impl<S> WorkerHandle<S> {
 
-    pub fn send(&self, task: Task<S>) -> Result<Arc<WorkerState>, WorkerSendError> {
+    pub(super) fn send(&self, task: Task<S>) -> Result<Arc<WorkerState>, WorkerSendError> {
         match self.task_tx.send(task) {
             Ok(_) => Ok(Arc::clone(&self.worker_state)),
             Err(_) => {
-                let panic_msg = self.worker_state.task_panic_msg.get().and_then(|s| s.clone());
+                // join や abort, cancel などは self を取るので、
+                // send　の失敗の原因は過去のタスクのパニックに絞られる。
+                let panic_msg = self.worker_state.task_panic_msg();
                 Err(WorkerSendError::PrevTaskPanic { panic_msg })
             },
         }
     }
 
-    pub fn abort(self) {
+    pub(super) fn sender(&self) -> WorkerTaskSender<S> {
+        WorkerTaskSender {
+            task_tx: self.task_tx.downgrade(),
+            worker_state: Arc::clone(&self.worker_state)
+        }
+    }
+
+    pub(super) fn abort(self) {
         if !self.worker_handle.is_finished() {
             self.worker_state.set_aborted();
             self.worker_handle.abort();
         }
     }
 
-    pub fn cancel(self) {
+    pub(super) fn cancel(self) {
         if !self.worker_handle.is_finished() {
             self.worker_state.set_cancelled();
             drop(self.task_tx);
         }
     }
     
-    pub async fn cancel_and_join(self) -> Result<S, WorkerJoinError> {
+    pub(super) async fn cancel_and_join(self) -> Result<S, WorkerJoinError> {
         if !self.worker_handle.is_finished() {
             self.worker_state.set_cancelled();
         }
-        self.join().await
-    }
-
-    pub async fn join(self) -> Result<S, WorkerJoinError> {
-        drop(self.task_tx);
         
+        drop(self.task_tx);
         match self.join_handle.await {
             Ok(Ok(state)) => Ok(state),
             Ok(Err(e)) => Err(e),
@@ -134,7 +140,31 @@ impl<S> WorkerHandle<S> {
                 let mut panic_msg = None;
                 if let Some(panic) = e.try_into_panic().ok() {
                     let panic = PanicPayload::new(panic);
-                    panic_msg = panic.as_str().map(|s| s.to_string());
+                    panic_msg = panic.msg().map(|s| s.to_string());
+                }
+
+                match panic_msg {
+                    Some(panic_msg) => Err(WorkerJoinError::with_msg(panic_msg)),
+                    None => Err(WorkerJoinError::with_no_msg()),
+                }
+            }
+        }
+    }
+
+    pub(super) async fn join(self) -> Result<S, WorkerJoinError> {
+        if !self.worker_handle.is_finished() {
+            self.worker_state.set_joined();
+        }
+
+        drop(self.task_tx);
+        match self.join_handle.await {
+            Ok(Ok(state)) => Ok(state),
+            Ok(Err(e)) => Err(e),
+            Err(e) => {
+                let mut panic_msg = None;
+                if let Some(panic) = e.try_into_panic().ok() {
+                    let panic = PanicPayload::new(panic);
+                    panic_msg = panic.msg().map(|s| s.to_string());
                 }
 
                 match panic_msg {
@@ -146,91 +176,48 @@ impl<S> WorkerHandle<S> {
     }
 }
 
-pub struct WorkerJoinError {
-    panic_msg: Option<Cow<'static, str>>
+pub struct WorkerTaskSender<S> {
+    task_tx: mpsc::WeakUnboundedSender<Task<S>>,
+    worker_state: Arc<WorkerState>,
 }
 
-impl WorkerJoinError {
+impl<S> WorkerTaskSender<S> {
 
-    fn with_msg(panic_msg: impl Into<Cow<'static, str>>) -> Self {
-        Self { panic_msg: Some(panic_msg.into()) }
-    }
+    pub fn send(&self, task: Task<S>) -> Result<Arc<WorkerState>, WorkerTaskSenderSendError> {
+        let err = || {
+            let f = self.worker_state.flags();
+            if f.is_aborted() {
+                WorkerTaskSenderSendError::WorkerAborted
+            }
+            else if f.is_joined() {
+                WorkerTaskSenderSendError::WorkerJoined
+            }
+            else if f.is_cancelled() {
+                WorkerTaskSenderSendError::WorkerCancelled
+            }
+            else {
+                let panic_msg = self.worker_state.task_panic_msg();
+                return WorkerTaskSenderSendError::PrevTaskPanic { panic_msg }
+            }
+        };
+        
+        let Some(task_tx) = self.task_tx.upgrade() else {
+            return Err(err());
+        };
 
-    fn with_no_msg() -> Self {
-        Self { panic_msg: None }
-    }
-
-    pub fn into_panic_msg(self) -> Option<Cow<'static, str>> {
-        self.panic_msg
-    }
-
-    pub fn panic_msg(&self) -> Option<&str> {
-        self.panic_msg.as_deref()
-    }
-}
-
-pub enum WorkerSendError {
-    PrevTaskPanic {
-        panic_msg: Option<Arc<String>>,
-    },
-}
-
-pub struct WorkerState {
-    flags: AtomicU8,
-    task_panic_msg: OnceLock<Option<Arc<String>>>,
-}
-
-impl WorkerState {
-
-    pub fn new() -> Self {
-        Self {
-            flags: AtomicU8::new(0),
-            task_panic_msg: OnceLock::new()
+        match task_tx.send(task) {
+            Ok(_) => Ok(Arc::clone(&self.worker_state)),
+            Err(_) => Err(err()),
         }
     }
-
-    pub fn flags(&self) -> WorkerFlagsSnapshot {
-        WorkerFlagsSnapshot { flags: self.get_flags() }
-    }
-
-    /// タスクがパニックしてワーカーが終了し、かつそのパニックのメッセージがあればそれを取得する。
-    /// これが None でもタスクがパニックしてワーカーが終了していることがあることに注意。
-    pub fn task_panic_msg(&self) -> Option<Arc<String>> {
-        self.task_panic_msg.get().and_then(|s| s.as_ref().map(Arc::clone))
-    }
-
-
-    const FLAG_ABORTED: u8 = 0b0000_0001;
-    const FLAG_CANCELLED: u8 = 0b0000_0010;
-    
-    fn set_aborted(&self) {
-        self.set_flag(Self::FLAG_ABORTED);
-    }
-
-    fn set_cancelled(&self) {
-        self.set_flag(Self::FLAG_CANCELLED);
-    }
-
-    fn set_flag(&self, flag: u8) {
-        self.flags.fetch_or(flag, Ordering::Release);
-    }
-
-    fn get_flags(&self) -> u8 {
-        self.flags.load(Ordering::Acquire)
-    }
 }
 
-pub struct WorkerFlagsSnapshot {
-    flags: u8
-}
+impl<S> Clone for WorkerTaskSender<S> {
 
-impl WorkerFlagsSnapshot {
-    
-    pub fn is_cancelled(&self) -> bool {
-        self.flags & WorkerState::FLAG_CANCELLED != 0
-    }
-
-    pub fn is_aborted(&self) -> bool {
-        self.flags & WorkerState::FLAG_ABORTED != 0
+    fn clone(&self) -> Self {
+        Self {
+            task_tx: self.task_tx.clone(),
+            worker_state: Arc::clone(&self.worker_state)
+        }
     }
 }

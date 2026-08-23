@@ -12,7 +12,7 @@ impl PanicPayload {
         Self { repr: SyncWrapper::new(panic_payload) }
     }
 
-    pub fn as_str(&self) -> Option<&str> {
+    pub fn msg(&self) -> Option<&str> {
         panic_payload_as_str(&self.repr)
     }
 
@@ -29,7 +29,7 @@ impl PanicPayload {
 /// Based on code from Tokio crate
 ///
 /// Source:
-/// - https://docs.rs/tokio/1.53.1/src/tokio/runtime/task/error.rs.html
+/// - <https://docs.rs/tokio/1.53.1/src/tokio/runtime/task/error.rs.html>
 /// - Copyright (c) Tokio Contributors
 /// - Licensed under the MIT License
 fn panic_payload_as_str(payload: &SyncWrapper<Box<dyn Any + Send>>) -> Option<&str> {
@@ -52,7 +52,7 @@ fn panic_payload_as_str(payload: &SyncWrapper<Box<dyn Any + Send>>) -> Option<&s
 /// Based on code from Tokio crate
 ///
 /// Source:
-/// - https://docs.rs/tokio/1.53.1/src/tokio/util/sync_wrapper.rs.html
+/// - <https://docs.rs/tokio/1.53.1/src/tokio/util/sync_wrapper.rs.html>
 /// - Copyright (c) Tokio Contributors
 /// - Licensed under the MIT License
 mod sync_wrapper {

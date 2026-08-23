@@ -2,7 +2,6 @@ use crate::*;
 use crate::internal::*;
 use std::pin::Pin;
 use std::future::Future;
-use std::sync::{Arc, Mutex as SyncMutex};
 
 
 /// Executor for running asynchronous and blocking tasks sequentially on a shared mutable state.
@@ -16,7 +15,7 @@ use std::sync::{Arc, Mutex as SyncMutex};
 /// When the executor is dropped, all tasks in the executor are immediately aborted.
 /// Note that blocking tasks are not asynchronous, so if one is already running,
 /// aborting it only detaches the task from the executor; 
-/// it continues running while holding the state.
+/// it continues running normally.
 /// 
 /// # Examples
 /// ```
@@ -55,16 +54,7 @@ use std::sync::{Arc, Mutex as SyncMutex};
 /// }
 /// ```
 pub struct Executor<S> {
-    worker: SyncMutex<Option<Worker<S>>>,
-}
-
-enum Worker<S> {
-    Unstarted {
-        state: S,
-    },
-    Started {
-        worker_handle: WorkerHandle<S>,
-    },
+    worker: Worker<S>,
 }
 
 impl<S> Executor<S> {
@@ -75,7 +65,7 @@ impl<S> Executor<S> {
     /// and is made available to tasks through exclusive mutable access.
     pub const fn new(state: S) -> Self {
         Self {
-            worker: SyncMutex::new(Some(Worker::Unstarted { state })),
+            worker: Worker::new(state),
         }
     }
 
@@ -110,12 +100,7 @@ impl<S> Executor<S> {
     /// # }
     /// ```
     pub fn cancel(self) {
-        let worker = self.worker.lock().unwrap().take();
-        match worker {
-            Some(Worker::Unstarted { .. }) => {},
-            Some(Worker::Started { worker_handle }) => worker_handle.cancel(),
-            None => unreachable!("illegal closed executor"),
-        }
+        self.worker.cancel();
     }
 
     /// Cancels all queued tasks,
@@ -145,12 +130,7 @@ impl<S> Executor<S> {
     /// # Panics
     /// Panics if this method is called outside Tokio runtime.
     pub async fn try_cancel_and_join(self) -> Result<S, ExecutorJoinError> {
-        let worker = self.worker.lock().unwrap().take();
-        match worker {
-            Some(Worker::Unstarted { state }) => Ok(state),
-            Some(Worker::Started { worker_handle }) => Ok(worker_handle.cancel_and_join().await?),
-            None => unreachable!("illegal closed executor"),
-        }
+        self.worker.cancel_and_join().await.map_err(Into::into)
     }
 
     /// Waits for all tasks to complete and returns the final state.
@@ -170,16 +150,23 @@ impl<S> Executor<S> {
     /// # Panics
     /// Panics if this method is called outside Tokio runtime.
     pub async fn try_join(self) -> Result<S, ExecutorJoinError> {
-        let worker = self.worker.lock().unwrap().take();
-        match worker {
-            Some(Worker::Unstarted { state }) => Ok(state),
-            Some(Worker::Started { worker_handle }) => Ok(worker_handle.join().await?),
-            None => unreachable!("illegal closed executor"),
-        }
+        self.worker.join().await.map_err(Into::into)
     }
 }
 
 impl<S: Send + 'static> Executor<S> {
+
+    /// Returns a [`TaskSpawner`] for queuing tasks onto this executor.
+    ///
+    /// The returned [`TaskSpawner`] can be used to spawn tasks without retaining the [`Executor`] itself.
+    ///
+    /// It provides methods equivalent to [`Executor::spawn`] and [`Executor::spawn_blocking`],
+    /// except that the returned [`TaskHandle`] immediately returns an error
+    /// if the executor is no longer available,
+    /// such as when the executor has started joining, been aborted, or been cancelled.
+    pub fn spawner(&self) -> TaskSpawner<S> {
+        TaskSpawner::new(self.worker.sender())
+    }
 
     /// Queues an asynchronous task for sequential execution and waits for it to complete.
     /// 
@@ -251,8 +238,6 @@ impl<S: Send + 'static> Executor<S> {
     /// Tasks are executed sequentially in the order they are queued,
     /// regardless of whether they are asynchronous or blocking.
     /// 
-    /// When the [`Executor`] is dropped, all tasks in the executor are immediately aborted.
-    /// 
     /// # Panics
     /// Panics if this method is called outside Tokio runtime.
     /// 
@@ -274,7 +259,7 @@ impl<S: Send + 'static> Executor<S> {
         R: Send + 'static,
     {
         let (task, task_result, task_controller) = build_async_task(task);
-        match self.submit(task) {
+        match self.worker.send(task) {
             Ok(worker_state) => TaskHandle::new(task_result, task_controller, worker_state),
             Err(WorkerSendError::PrevTaskPanic { panic_msg }) => TaskHandle::prev_task_panicked(panic_msg),
         }
@@ -289,11 +274,6 @@ impl<S: Send + 'static> Executor<S> {
     /// 
     /// The blocking task is executed using blocking thread pool
     /// to avoid blocking the asynchronous runtime.
-    /// 
-    /// When the [`Executor`] is dropped, all tasks in the executor are immediately aborted.
-    /// Note that blocking tasks are not asynchronous, so if one is already running,
-    /// aborting it only detaches the task from the executor; 
-    /// it continues running while holding the state.
     /// 
     /// # Panics
     /// Panics if this method is called outside Tokio runtime.
@@ -316,31 +296,10 @@ impl<S: Send + 'static> Executor<S> {
         R: Send + 'static,
     {
         let (task, task_result, task_controller) = build_blocking_task(task);
-        match self.submit(task) {
+        match self.worker.send(task) {
             Ok(worker_state) => TaskHandle::new(task_result, task_controller, worker_state),
             Err(WorkerSendError::PrevTaskPanic { panic_msg }) => TaskHandle::prev_task_panicked(panic_msg),
         }
-    }
-
-
-    fn submit(&self, task: Task<S>) -> Result<Arc<WorkerState>, WorkerSendError> {
-        let mut locked_worker = self.worker.lock().unwrap();
-
-        if let Some(Worker::Started { ref worker_handle, .. }) = *locked_worker {
-            return worker_handle.send(task);
-        }
-
-        let Some(Worker::Unstarted { state }) = locked_worker.take() else {
-            unreachable!("illegal closed executor")
-        };
-
-        let worker_handle = spawn_worker(state);
-        let worker_state = match worker_handle.send(task) {
-            Ok(worker_state) => worker_state,
-            Err(WorkerSendError::PrevTaskPanic { .. }) => unreachable!(),
-        };
-        *locked_worker = Some(Worker::Started { worker_handle });
-        Ok(worker_state)
     }
 }
 
@@ -351,49 +310,38 @@ impl<S: Default> Default for Executor<S> {
     }
 }
 
-impl<S> Drop for Executor<S> {
-
-    fn drop(&mut self) {
-        match self.worker.lock().ok().and_then(|mut e| e.take()) {
-            Some(Worker::Unstarted { .. }) => {},
-            Some(Worker::Started { worker_handle, .. }) => worker_handle.abort(),
-            None => {}
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::future::Future;
 
-    fn require_send_and_static<F: Future + Send + 'static>(_: F) {}
-    fn require_send<F: Future + Send>(_: F) {}
+    fn require_send_static<F: Send + 'static>(_: F) {}
+    fn require_send<F: Send>(_: F) {}
 
     #[allow(unused)]
-    fn assert_fn_future() {
+    fn assert_impls() {
         let executor = Executor::new(());
-        require_send_and_static(executor.join());
+        require_send_static(executor.join());
 
         let executor = Executor::new(());
-        require_send_and_static(executor.try_join());
+        require_send_static(executor.try_join());
 
         let executor = Executor::new(());
-        require_send_and_static(executor.cancel_and_join());
+        require_send_static(executor.cancel_and_join());
 
         let executor = Executor::new(());
-        require_send_and_static(executor.try_cancel_and_join());
+        require_send_static(executor.try_cancel_and_join());
 
         let executor = Executor::new(());
-        require_send_and_static(executor.spawn(|_| Box::pin(async {})));
+        require_send_static(executor.spawn(|_| Box::pin(async {})));
 
         let executor = Executor::new(());
-        require_send_and_static(executor.spawn_blocking(|_| {}));
+        require_send_static(executor.spawn_blocking(|_| {}));
 
         let executor = Executor::new(());
         require_send(executor.execute(|_| Box::pin(async {})));
 
         let executor = Executor::new(());
         require_send(executor.execute_blocking(|_| {}));
+        require_send(executor);
     }
 }

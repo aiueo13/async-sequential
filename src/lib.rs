@@ -1,6 +1,7 @@
 mod internal;
 mod executor_join_error;
 mod executor;
+mod task_spawner;
 mod task_canceller;
 mod task_error;
 mod task_handle;
@@ -9,6 +10,7 @@ use internal::*;
 
 pub use executor_join_error::ExecutorJoinError;
 pub use executor::Executor;
+pub use task_spawner::TaskSpawner;
 pub use task_canceller::TaskCanceller;
 pub use task_error::TaskError;
 pub use task_handle::TaskHandle;
@@ -371,8 +373,8 @@ mod tests3 {
         let err = pending.await.unwrap_err();
         assert!(err.is_cancelled());
         assert!(err.is_task_cancelled());
-        assert!(!err.is_worker_aborted());
-        assert!(!err.is_worker_cancelled());
+        assert!(!err.is_executor_aborted());
+        assert!(!err.is_executor_cancelled());
     }
 
     #[tokio::test]
@@ -394,8 +396,8 @@ mod tests3 {
         let err = pending.await.unwrap_err();
         assert!(err.is_cancelled());
         assert!(err.is_task_cancelled());
-        assert!(!err.is_worker_aborted());
-        assert!(!err.is_worker_cancelled());
+        assert!(!err.is_executor_aborted());
+        assert!(!err.is_executor_cancelled());
     }
 
     #[tokio::test]
@@ -415,8 +417,8 @@ mod tests3 {
         let err = pending.await.unwrap_err();
         assert!(err.is_cancelled());
         assert!(!err.is_task_cancelled());
-        assert!(err.is_worker_aborted());
-        assert!(!err.is_worker_cancelled());
+        assert!(err.is_executor_aborted());
+        assert!(!err.is_executor_cancelled());
     }
 
     #[tokio::test]
@@ -436,8 +438,8 @@ mod tests3 {
         let err = pending.await.unwrap_err();
         assert!(err.is_cancelled());
         assert!(!err.is_task_cancelled());
-        assert!(!err.is_worker_aborted());
-        assert!(err.is_worker_cancelled());
+        assert!(!err.is_executor_aborted());
+        assert!(err.is_executor_cancelled());
     }
 
     #[tokio::test]

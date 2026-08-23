@@ -11,6 +11,9 @@ pub struct TaskHandle<R> {
 }
 
 enum Repr<R> {
+    WorkerAlreadyAborted,
+    WorkerAlreadyJoined,
+    WorkerAlreadyCancelled,
     PrevTaskPanic {
         panic_msg: Option<Arc<String>>
     },
@@ -22,6 +25,18 @@ enum Repr<R> {
 }
 
 impl<R> TaskHandle<R> {
+
+    pub(crate) fn worker_already_aborted() -> Self {
+        Self { repr: Repr::WorkerAlreadyAborted }
+    }
+
+    pub(crate) fn worker_already_joined() -> Self {
+        Self { repr: Repr::WorkerAlreadyJoined }
+    }
+
+    pub(crate) fn worker_already_cancelled() -> Self {
+        Self { repr: Repr::WorkerAlreadyCancelled }
+    }
 
     pub(crate) fn prev_task_panicked(panic_msg: Option<Arc<String>>) -> Self {
         Self { repr: Repr::PrevTaskPanic { panic_msg } }
@@ -87,10 +102,13 @@ impl<R> TaskHandle<R> {
     /// ```
     pub fn cancel(&self) -> bool {
         match &self.repr {
+            Repr::WorkerAlreadyAborted |
+            Repr::WorkerAlreadyJoined |
+            Repr::WorkerAlreadyCancelled |
             Repr::PrevTaskPanic { .. } => false,
             Repr::Active { task_controller, worker_state, .. } => {
-                let worker_flags = worker_state.flags();
-                if worker_flags.is_aborted() || worker_flags.is_cancelled() {
+                let f = worker_state.flags();
+                if f.is_aborted() || f.is_cancelled() || f.is_joined() {
                     false
                 }
                 else {
@@ -128,14 +146,17 @@ impl<R> TaskHandle<R> {
     /// ```
     pub fn canceller(&self) -> TaskCanceller {
         match &self.repr {
+            Repr::WorkerAlreadyAborted |
+            Repr::WorkerAlreadyJoined |
+            Repr::WorkerAlreadyCancelled |
             Repr::PrevTaskPanic { .. } => TaskCanceller::inactive(),
             Repr::Active { task_controller, worker_state, .. } => {
                 let task_controller = task_controller.clone();
                 let worker_state = Arc::clone(worker_state);
 
                 TaskCanceller::new(Arc::new(move || {
-                    let worker_flags = worker_state.flags();
-                    if worker_flags.is_aborted() || worker_flags.is_cancelled() {
+                    let f = worker_state.flags();
+                    if f.is_aborted() || f.is_cancelled() || f.is_joined() {
                         false
                     }
                     else {
@@ -156,6 +177,15 @@ impl<R> Future for TaskHandle<R> {
     ) -> Poll<Self::Output> {
 
         match &mut self.repr {
+            Repr::WorkerAlreadyAborted => {
+                Poll::Ready(Err(TaskError::worker_aborted()))
+            },
+            Repr::WorkerAlreadyJoined => {
+                Poll::Ready(Err(TaskError::worker_joined()))
+            },
+            Repr::WorkerAlreadyCancelled => {
+                Poll::Ready(Err(TaskError::worker_cancelled()))
+            },
             Repr::PrevTaskPanic { panic_msg } => {
                 Poll::Ready(Err(TaskError::prev_task_panicked(panic_msg.take())))
             },
@@ -173,6 +203,9 @@ impl<R> Future for TaskHandle<R> {
                                 let worker_flags = worker_state.flags();
                                 if worker_flags.is_cancelled() {
                                     Poll::Ready(Err(TaskError::worker_cancelled()))
+                                }
+                                else if worker_flags.is_joined() {
+                                    Poll::Ready(Err(TaskError::worker_joined()))
                                 }
                                 else if worker_flags.is_aborted() {
                                     Poll::Ready(Err(TaskError::worker_aborted()))

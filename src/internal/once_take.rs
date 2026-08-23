@@ -10,7 +10,7 @@ pub struct OnceTake<T> {
 
 impl<T> OnceTake<T> {
 
-    pub fn new(value: T) -> Self {
+    pub const fn new(value: T) -> Self {
         Self {
             taken: AtomicBool::new(false),
             value: UnsafeCell::new(Some(value)),
@@ -18,7 +18,7 @@ impl<T> OnceTake<T> {
     }
 
     pub fn take(&self) -> Option<T> {
-        if self.taken.swap(true, Ordering::Acquire) {
+        if self.taken.swap(true, Ordering::AcqRel) {
             None
         } 
         else {

@@ -3,11 +3,11 @@ use std::{panic::{RefUnwindSafe, UnwindSafe}, sync::Arc};
 
 /// Handle for canceling a task.
 ///
-/// This can be obtained from [`TaskHandle::canceller`].
-/// It provides the same cancellation operation as [`TaskHandle::cancel`]
+/// It can be obtained from [`TaskHandle::canceller`]
+/// and provides the same cancellation operation as [`TaskHandle::cancel`]
 /// without retaining the task's result or its [`TaskHandle`].
 ///
-/// This type is cheap to clone.
+/// It can be cloned cheaply.
 /// 
 /// [`TaskHandle`]: crate::TaskHandle
 /// [`TaskHandle::cancel`]: crate::TaskHandle::cancel
