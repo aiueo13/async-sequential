@@ -108,7 +108,7 @@ impl<R> TaskHandle<R> {
             Repr::PrevTaskPanic { .. } => false,
             Repr::Active { task_controller, worker_state, .. } => {
                 let f = worker_state.flags();
-                if f.is_aborted() || f.is_cancelled() || f.is_joined() {
+                if f.is_aborted() || f.is_cancelled() {
                     false
                 }
                 else {
@@ -156,7 +156,7 @@ impl<R> TaskHandle<R> {
 
                 TaskCanceller::new(Arc::new(move || {
                     let f = worker_state.flags();
-                    if f.is_aborted() || f.is_cancelled() || f.is_joined() {
+                    if f.is_aborted() || f.is_cancelled() {
                         false
                     }
                     else {
