@@ -200,13 +200,12 @@ impl<R> Future for TaskHandle<R> {
                                     return Poll::Ready(Err(TaskError::task_cancelled()))
                                 }
 
+                                // 実装上、joinでエラーになるタスクはここに来ない。
+                                // また worker_flags.is_joined() が true でも
+                                // 前のタスクでパニックになっている可能性があることに注意。
                                 let worker_flags = worker_state.flags();
                                 if worker_flags.is_cancelled() {
                                     Poll::Ready(Err(TaskError::worker_cancelled()))
-                                }
-                                else if worker_flags.is_joined() {
-                                    // 実装上、ここに来ることはない
-                                    Poll::Ready(Err(TaskError::worker_joined()))
                                 }
                                 else if worker_flags.is_aborted() {
                                     Poll::Ready(Err(TaskError::worker_aborted()))
