@@ -15,12 +15,12 @@ use std::pin::Pin;
 /// It can be cloned cheaply.
 #[derive(Clone)]
 pub struct TaskSpawner<S> {
-    sender: WorkerTaskSender<S>
+    sender: WeakWorkerTaskSender<S>
 }
 
 impl<S> TaskSpawner<S> {
 
-    pub(crate) fn new(sender: WorkerTaskSender<S>) -> Self {
+    pub(crate) fn new(sender: WeakWorkerTaskSender<S>) -> Self {
         Self { sender }
     }
 }

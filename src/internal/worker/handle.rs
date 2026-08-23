@@ -106,8 +106,8 @@ impl<S> WorkerHandle<S> {
         }
     }
 
-    pub(super) fn sender(&self) -> WorkerTaskSender<S> {
-        WorkerTaskSender {
+    pub(super) fn weak_sender(&self) -> WeakWorkerTaskSender<S> {
+        WeakWorkerTaskSender {
             task_tx: self.task_tx.downgrade(),
             worker_state: Arc::clone(&self.worker_state)
         }
@@ -176,12 +176,12 @@ impl<S> WorkerHandle<S> {
     }
 }
 
-pub struct WorkerTaskSender<S> {
+pub struct WeakWorkerTaskSender<S> {
     task_tx: mpsc::WeakUnboundedSender<Task<S>>,
     worker_state: Arc<WorkerState>,
 }
 
-impl<S> WorkerTaskSender<S> {
+impl<S> WeakWorkerTaskSender<S> {
 
     pub fn send(&self, task: Task<S>) -> Result<Arc<WorkerState>, WorkerTaskSenderSendError> {
         let err = || {
@@ -212,7 +212,7 @@ impl<S> WorkerTaskSender<S> {
     }
 }
 
-impl<S> Clone for WorkerTaskSender<S> {
+impl<S> Clone for WeakWorkerTaskSender<S> {
 
     fn clone(&self) -> Self {
         Self {

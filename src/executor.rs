@@ -165,7 +165,7 @@ impl<S: Send + 'static> Executor<S> {
     /// if the executor is no longer available,
     /// such as when the executor has started joining, been aborted, or been cancelled.
     pub fn spawner(&self) -> TaskSpawner<S> {
-        TaskSpawner::new(self.worker.sender())
+        TaskSpawner::new(self.worker.weak_sender())
     }
 
     /// Queues an asynchronous task for sequential execution and waits for it to complete.

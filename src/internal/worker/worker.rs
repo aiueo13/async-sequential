@@ -74,11 +74,11 @@ impl<S: Send + 'static> Worker<S> {
         Ok(worker_state)
     }
 
-    pub fn sender(&self) -> WorkerTaskSender<S> {
+    pub fn weak_sender(&self) -> WeakWorkerTaskSender<S> {
         let mut locked_worker = self.repr.lock().unwrap();
 
         if let Some(Repr::Started { ref worker_handle, .. }) = *locked_worker {
-            return worker_handle.sender()
+            return worker_handle.weak_sender()
         }
 
         let Some(Repr::Unstarted { state }) = locked_worker.take() else {
@@ -86,7 +86,7 @@ impl<S: Send + 'static> Worker<S> {
         };
 
         let worker_handle = spawn_worker(state);
-        let sender = worker_handle.sender();
+        let sender = worker_handle.weak_sender();
         *locked_worker = Some(Repr::Started { worker_handle });
         sender
     }
