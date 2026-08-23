@@ -202,7 +202,7 @@ impl<R> Future for TaskHandle<R> {
 
                                 // 実装上、joinでエラーになるタスクはここに来ない。
                                 // また worker_flags.is_joined() が true でも
-                                // 前のタスクでパニックになっており、それが原因である可能性があることに注意。
+                                // 前のタスクでパニックになっていることが原因である可能性があることに注意。
                                 let worker_flags = worker_state.flags();
                                 if worker_flags.is_cancelled() {
                                     Poll::Ready(Err(TaskError::worker_cancelled()))
