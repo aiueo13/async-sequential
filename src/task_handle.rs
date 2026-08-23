@@ -205,6 +205,7 @@ impl<R> Future for TaskHandle<R> {
                                     Poll::Ready(Err(TaskError::worker_cancelled()))
                                 }
                                 else if worker_flags.is_joined() {
+                                    // 実装上、ここに来ることはない
                                     Poll::Ready(Err(TaskError::worker_joined()))
                                 }
                                 else if worker_flags.is_aborted() {
