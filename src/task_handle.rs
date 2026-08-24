@@ -5,15 +5,15 @@ use std::{pin::Pin, sync::Arc, task::Poll};
 /// Handle for waiting for a task to complete.
 ///
 /// Awaiting the handle returns the task's result if the task completes successfully,
-/// or a [`TaskError`] if the task could not complete.
+/// or a [TaskError] if the task could not complete.
 pub struct TaskHandle<R> {
     repr: Repr<R>,
 }
 
 enum Repr<R> {
     WorkerAlreadyAborted,
-    WorkerAlreadyJoined,
     WorkerAlreadyCancelled,
+    WorkerTaskSenderUnavailable,
     PrevTaskPanic {
         panic_msg: Option<Arc<String>>
     },
@@ -30,15 +30,15 @@ impl<R> TaskHandle<R> {
         Self { repr: Repr::WorkerAlreadyAborted }
     }
 
-    pub(crate) fn worker_already_joined() -> Self {
-        Self { repr: Repr::WorkerAlreadyJoined }
-    }
-
     pub(crate) fn worker_already_cancelled() -> Self {
         Self { repr: Repr::WorkerAlreadyCancelled }
     }
 
-    pub(crate) fn prev_task_panicked(panic_msg: Option<Arc<String>>) -> Self {
+    pub(crate) fn worker_task_sender_unavailable() -> Self {
+        Self { repr: Repr::WorkerTaskSenderUnavailable }
+    }
+
+    pub(crate) fn prev_task_already_panicked(panic_msg: Option<Arc<String>>) -> Self {
         Self { repr: Repr::PrevTaskPanic { panic_msg } }
     }
 
@@ -55,11 +55,11 @@ impl<R> TaskHandle<R> {
 impl<R> TaskHandle<R> {
 
     /// Cancels the task if it is still queued,
-    /// returning `true` if the task was cancelled by this call.
+    /// returning true if the task was cancelled by this call.
     /// 
     /// This method removes the task from the queue if it has not started running
-    /// and **does not abort a running task** to preserve the executor state invariant.
-    /// It does nothing if the task has already completed.
+    /// and **does not abort a running task** to preserve the state invariant.
+    /// It does nothing if the task has already finished.
     /// 
     /// # Examples
     /// ```
@@ -103,8 +103,8 @@ impl<R> TaskHandle<R> {
     pub fn cancel(&self) -> bool {
         match &self.repr {
             Repr::WorkerAlreadyAborted |
-            Repr::WorkerAlreadyJoined |
             Repr::WorkerAlreadyCancelled |
+            Repr::WorkerTaskSenderUnavailable |
             Repr::PrevTaskPanic { .. } => false,
             Repr::Active { task_controller, worker_state, .. } => {
                 let f = worker_state.flags();
@@ -118,9 +118,9 @@ impl<R> TaskHandle<R> {
         }
     }
 
-    /// Returns a [`TaskCanceller`] that can be used to cancel the task.
+    /// Returns a [TaskCanceller] that can be used to cancel the task.
     ///
-    /// The returned canceller has the same cancellation behavior as [`cancel`](Self::cancel).
+    /// The returned canceller has the same cancellation behavior as [cancel](Self::cancel).
     /// It can be used independently of this handle, allowing cancellation to be
     /// triggered from a different task or stored separately from the handle.
     ///
@@ -147,8 +147,8 @@ impl<R> TaskHandle<R> {
     pub fn canceller(&self) -> TaskCanceller {
         match &self.repr {
             Repr::WorkerAlreadyAborted |
-            Repr::WorkerAlreadyJoined |
             Repr::WorkerAlreadyCancelled |
+            Repr::WorkerTaskSenderUnavailable |
             Repr::PrevTaskPanic { .. } => TaskCanceller::inactive(),
             Repr::Active { task_controller, worker_state, .. } => {
                 let task_controller = task_controller.clone();
@@ -180,8 +180,8 @@ impl<R> Future for TaskHandle<R> {
             Repr::WorkerAlreadyAborted => {
                 Poll::Ready(Err(TaskError::worker_aborted()))
             },
-            Repr::WorkerAlreadyJoined => {
-                Poll::Ready(Err(TaskError::worker_joined()))
+            Repr::WorkerTaskSenderUnavailable => {
+                Poll::Ready(Err(TaskError::worker_task_sender_unavailable()))
             },
             Repr::WorkerAlreadyCancelled => {
                 Poll::Ready(Err(TaskError::worker_cancelled()))
@@ -200,9 +200,6 @@ impl<R> Future for TaskHandle<R> {
                                     return Poll::Ready(Err(TaskError::task_cancelled()))
                                 }
 
-                                // 実装上、joinでエラーになるタスクはここに来ない。
-                                // また worker_flags.is_joined() が true でも
-                                // 前のタスクでパニックになっていることが原因である可能性があることに注意。
                                 let worker_flags = worker_state.flags();
                                 if worker_flags.is_cancelled() {
                                     Poll::Ready(Err(TaskError::worker_cancelled()))

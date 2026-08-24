@@ -17,7 +17,7 @@ where
     R: Send + 'static,
 {
     let (result_tx, result_rx) = oneshot::channel();
-    let task = TaskRepr::Async(Box::new(|s: &mut S| Box::pin(async {
+    let task = RawTask::Async(Box::new(|s: &mut S| Box::pin(async {
         let _ = result_tx.send(task(s).await);
     })));
     build_task(task, result_rx)
@@ -32,14 +32,14 @@ where
     R: Send + 'static,
 {
     let (result_tx, result_rx) = oneshot::channel();
-    let task = TaskRepr::Blocking(Box::new(move |s: &mut S| {
+    let task = RawTask::Blocking(Box::new(move |s: &mut S| {
         let _ = result_tx.send(task(s));
     }));
     build_task(task, result_rx)
 }
 
 fn build_task<S, R>(
-    task: TaskRepr<S>,
+    task: RawTask<S>,
     result_rx: oneshot::Receiver<R>,
 ) -> (Task<S>, TaskResultReceiver<R>, TaskController)
 where 
@@ -55,17 +55,17 @@ where
 
 
 pub struct Task<S> {
-    task: Arc<OnceTake<(TaskRepr<S>, TaskPanicSender)>>,
+    task: Arc<OnceTake<(RawTask<S>, TaskPanicSender)>>,
 }
 
-pub enum TaskRepr<S> {
+pub enum RawTask<S> {
     Blocking(Box<dyn (FnOnce(&mut S) -> ()) + Send>),
     Async(Box<dyn (for<'a> FnOnce(&'a mut S) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>>) + Send>),
 }
 
 impl<S> Task<S> {
 
-    pub fn take(self) -> Option<(TaskRepr<S>, TaskPanicSender)> {
+    pub fn take(self) -> Option<(RawTask<S>, TaskPanicSender)> {
         self.task.take()
     }
 }

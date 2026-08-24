@@ -47,7 +47,7 @@ impl std::error::Error for ExecutorJoinError {}
 
 impl From<ExecutorJoinError> for std::io::Error {
 
-    fn from(_: ExecutorJoinError) -> std::io::Error {
-        std::io::Error::new(std::io::ErrorKind::Other, "task panicked")
+    fn from(value: ExecutorJoinError) -> std::io::Error {
+        std::io::Error::other(value)
     }
 }

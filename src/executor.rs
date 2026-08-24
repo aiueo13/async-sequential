@@ -1,7 +1,5 @@
 use crate::*;
-use crate::internal::*;
-use std::pin::Pin;
-use std::future::Future;
+use std::{future::Future, pin::Pin, sync::{Arc, Mutex as SyncMutex}};
 
 
 /// Executor for running asynchronous and blocking tasks sequentially on a shared mutable state.
@@ -12,9 +10,9 @@ use std::future::Future;
 /// If a task panics, subsequent tasks also panic because the state invariants
 /// may have been violated by the task's panic.
 /// 
-/// When the executor is dropped, all tasks in the executor are immediately aborted.
+/// When the Executor is dropped, all tasks in the Executor are immediately aborted.
 /// Note that blocking tasks are not asynchronous, so if one is already running,
-/// aborting it only detaches the task from the executor; 
+/// aborting it only detaches the task from the Executor; 
 /// it continues running normally.
 /// 
 /// # Examples
@@ -54,26 +52,73 @@ use std::future::Future;
 /// }
 /// ```
 pub struct Executor<S> {
-    worker: Worker<S>,
+    worker: SyncMutex<Option<Worker<S>>>,
+}
+
+enum Worker<S> {
+    Unstarted {
+        state: S,
+    },
+    Started {
+        worker_handle: WorkerHandle<S>,
+    },
 }
 
 impl<S> Executor<S> {
 
-    /// Creates a new executor with the given initial state.
+    /// Creates a new Executor with the given initial state.
     ///
-    /// The state is owned by the executor
+    /// The state is owned by the Executor
     /// and is made available to tasks through exclusive mutable access.
     pub const fn new(state: S) -> Self {
         Self {
-            worker: Worker::new(state),
+            worker: SyncMutex::new(Some(Worker::Unstarted { state }))
         }
     }
 
-    /// Cancels all queued tasks and detaches the currently running task
-    /// from the executor so that it can continue running.
+    /// Waits for all tasks to complete and returns the final state.
+    ///
+    /// Note that this method does not complete as long as any [TaskSpawner]
+    /// obtained from [spawner](Executor::spawner) remains alive.
+    /// To allow it to complete, either drop all TaskSpawners
+    /// or call [close_spawners](Executor::close_spawners) beforehand.
     /// 
-    /// This method removes tasks from the queue if they have not started running
-    /// and **does not abort a running task**.
+    /// # Panics
+    /// Panics if any task panicked before or during this method,
+    /// or if this method is called outside Tokio runtime.
+    pub async fn join(self) -> S {
+        self.try_join().await.unwrap_or_else(|e| e.panic())
+    }
+
+    /// Waits for all tasks to complete and returns the final state.
+    ///
+    /// Note that this method does not complete as long as any [TaskSpawner]
+    /// obtained from [spawner](Executor::spawner) remains alive.
+    /// To allow it to complete, either drop all TaskSpawners
+    /// or call [close_spawners](Executor::close_spawners) beforehand.
+    /// 
+    /// # Errors
+    /// Returns an error if any task panicked before or during this method.
+    /// 
+    /// # Panics
+    /// Panics if this method is called outside Tokio runtime.
+    pub async fn try_join(self) -> Result<S, ExecutorJoinError> {
+        let worker = self.worker.lock().unwrap().take();
+        match worker {
+            Some(Worker::Unstarted { state, .. }) => Ok(state),
+            Some(Worker::Started { worker_handle }) => Ok(worker_handle.join().await?),
+            None => unreachable!("illegal closed executor"),
+        }
+    }
+
+    /// Cancels all queued tasks and prevents subsequent tasks from being queued, 
+    /// detaches the currently running task from the Executor so that it can continue running.
+    /// 
+    /// This method **does not abort a running task**.
+    /// To abort the currently running task, drop the Executor itself.
+    /// Note that blocking tasks are not asynchronous, so if one is already running,
+    /// aborting it only detaches the task from the Executor; 
+    /// it continues running normally.
     /// 
     /// # Examples
     /// ```
@@ -100,15 +145,19 @@ impl<S> Executor<S> {
     /// # }
     /// ```
     pub fn cancel(self) {
-        self.worker.cancel();
+        let worker = self.worker.lock().unwrap().take();
+        match worker {
+            Some(Worker::Unstarted { .. }) => {},
+            Some(Worker::Started { worker_handle }) => worker_handle.cancel(),
+            None => unreachable!("illegal closed executor"),
+        }
     }
 
-    /// Cancels all queued tasks,
+    /// Cancels all queued tasks and prevents subsequent tasks from being queued,
     /// waits for the currently running task to complete,
     /// and returns the final state.
     /// 
-    /// This method removes tasks from the queue if they have not started running
-    /// and **does not abort a running task** to preserve the executor state invariant.
+    /// This method **does not abort a running task** to preserve the state invariant.
     /// 
     /// # Panics
     /// Panics if any task panicked before or during this method,
@@ -117,12 +166,11 @@ impl<S> Executor<S> {
         self.try_cancel_and_join().await.unwrap_or_else(|e| e.panic())
     }
 
-    /// Cancels all queued tasks,
+    /// Cancels all queued tasks and prevents subsequent tasks from being queued,
     /// waits for the currently running task to complete,
     /// and returns the final state.
     /// 
-    /// This method removes tasks from the queue if they have not started running
-    /// and **does not abort a running task** to preserve the executor state invariant.
+    /// This method **does not abort a running task** to preserve the state invariant.
     /// 
     /// # Errors
     /// Returns an error if any task panicked before or during this method.
@@ -130,42 +178,135 @@ impl<S> Executor<S> {
     /// # Panics
     /// Panics if this method is called outside Tokio runtime.
     pub async fn try_cancel_and_join(self) -> Result<S, ExecutorJoinError> {
-        self.worker.cancel_and_join().await.map_err(Into::into)
+        let worker = self.worker.lock().unwrap().take();
+        match worker {
+            Some(Worker::Unstarted { state, .. }) => Ok(state),
+            Some(Worker::Started { worker_handle }) => Ok(worker_handle.cancel_and_join().await?),
+            None => unreachable!("illegal closed executor"),
+        }
     }
 
-    /// Waits for all tasks to complete and returns the final state.
+    /// Closes all [TaskSpawner]s currently associated with this Executor.
     ///
-    /// # Panics
-    /// Panics if any task panicked before or during this method,
-    /// or if this method is called outside Tokio runtime.
-    pub async fn join(self) -> S {
-        self.try_join().await.unwrap_or_else(|e| e.panic())
-    }
-
-    /// Waits for all tasks to complete and returns the final state.
-    ///
-    /// # Errors
-    /// Returns an error if any task panicked before or during this method.
-    /// 
-    /// # Panics
-    /// Panics if this method is called outside Tokio runtime.
-    pub async fn try_join(self) -> Result<S, ExecutorJoinError> {
-        self.worker.join().await.map_err(Into::into)
+    /// After this method is called, all existing TaskSpawners can no longer spawn new tasks.
+    /// Tasks that have already been queued or are currently running are unaffected.
+    /// TaskSpawners obtained after this call are also unaffected.
+    pub fn close_spawners(&self) {
+        let mut worker = self.worker.lock().unwrap();
+        match &mut *worker {
+            Some(Worker::Unstarted { .. }) => {},
+            Some(Worker::Started { worker_handle }) => worker_handle.close_task_senders(),
+            None => unreachable!("illegal closed executor"),
+        }
     }
 }
 
 impl<S: Send + 'static> Executor<S> {
 
-    /// Returns a [`TaskSpawner`] for queuing tasks onto this executor.
+    /// Returns a [TaskSpawner] for queuing tasks onto this Executor.
     ///
-    /// The returned [`TaskSpawner`] can be used to spawn tasks without retaining the [`Executor`] itself.
-    ///
-    /// It provides methods equivalent to [`Executor::spawn`] and [`Executor::spawn_blocking`],
-    /// except that the returned [`TaskHandle`] immediately returns an error
-    /// if the executor is no longer available,
-    /// such as when the executor has started joining, been aborted, or been cancelled.
+    /// TaskSpawner provides methods equivalent to [spawn](Executor::spawn) and [spawn_blocking](Executor::spawn_blocking),
+    /// except that the returned [TaskHandle] immediately returns an error
+    /// if the TaskSpawner can no longer spawn tasks,
+    /// such as when the TaskSpawner has been closed
+    /// or the Executor has been aborted or cancelled.
+    /// In such cases, [TaskError::is_task_spawner_unavailable] returns true.
+    /// 
+    /// Note that [join](Executor::join) and [try_join](Executor::try_join) does not complete as long as any TaskSpawner remains alive.
+    /// To allow it to complete, either drop all TaskSpawners
+    /// or call [close_spawners](Executor::close_spawners) beforehand.
+    /// 
+    /// # Panics
+    /// Panics if this method is called outside Tokio runtime.
+    /// 
+    /// # Examples
+    /// ```
+    /// # fn main() {
+    /// # tokio_test::block_on(async {
+    /// let executor = async_sequential::Executor::new(());
+    /// let spawner = executor.spawner();
+    /// 
+    /// spawner.spawn(move |_| Box::pin(async move {}));
+    /// 
+    /// // Ensures that the spawner is closed before join.
+    /// drop(spawner);
+    /// assert!(executor.try_join().await.is_ok());
+    /// # });
+    /// # }
+    /// ```
     pub fn spawner(&self) -> TaskSpawner<S> {
-        TaskSpawner::new(self.worker.weak_sender())
+        TaskSpawner::new(self.sender())
+    }
+
+    /// Queues an asynchronous task for sequential execution, 
+    /// returning a [TaskHandle] to wait for it to complete.
+    /// 
+    /// The task is executed after all previously queued tasks have completed.
+    /// Tasks are executed sequentially in the order they are queued,
+    /// regardless of whether they are asynchronous or blocking.
+    /// 
+    /// # Panics
+    /// Panics if this method is called outside Tokio runtime.
+    /// 
+    /// # Examples
+    /// ```
+    /// # fn main() {
+    /// # tokio_test::block_on(async {
+    /// let executor = async_sequential::Executor::new(Vec::new());
+    /// 
+    /// executor.spawn(move |state| Box::pin(async move {
+    ///     state.push(0);
+    /// }));
+    /// # });
+    /// # }
+    /// ```
+    pub fn spawn<T, R>(&self, task: T) -> TaskHandle<R>
+    where
+        T: for<'a> FnOnce(&'a mut S) -> Pin<Box<dyn Future<Output = R> + Send + 'a>> + Send + 'static,
+        R: Send + 'static,
+    {
+        let (task, task_result, task_controller) = build_async_task(task);
+        match self.send(task) {
+            Ok(worker_state) => TaskHandle::new(task_result, task_controller, worker_state),
+            Err(WorkerSendError::PrevTaskPanic { panic_msg }) => TaskHandle::prev_task_already_panicked(panic_msg),
+        }
+    }
+
+    /// Queues a blocking task for sequential execution, 
+    /// returning a [TaskHandle] to wait for it to complete.
+    ///
+    /// The task is executed after all previously queued tasks have completed.
+    /// Tasks are executed sequentially in the order they are queued,
+    /// regardless of whether they are asynchronous or blocking.
+    /// 
+    /// The blocking task is executed using the runtime's blocking thread pool
+    /// to avoid blocking the asynchronous runtime.
+    /// 
+    /// # Panics
+    /// Panics if this method is called outside Tokio runtime.
+    /// 
+    /// # Examples
+    /// ```
+    /// # fn main() {
+    /// # tokio_test::block_on(async {
+    /// let executor = async_sequential::Executor::new(Vec::new());
+    /// 
+    /// executor.spawn_blocking(move |state| {
+    ///     state.push(0);
+    /// });
+    /// # });
+    /// # }
+    /// ```
+    pub fn spawn_blocking<T, R>(&self, task: T) -> TaskHandle<R>
+    where
+        T: (FnOnce(&mut S) -> R) + Send + 'static,
+        R: Send + 'static,
+    {
+        let (task, task_result, task_controller) = build_blocking_task(task);
+        match self.send(task) {
+            Ok(worker_state) => TaskHandle::new(task_result, task_controller, worker_state),
+            Err(WorkerSendError::PrevTaskPanic { panic_msg }) => TaskHandle::prev_task_already_panicked(panic_msg),
+        }
     }
 
     /// Queues an asynchronous task for sequential execution and waits for it to complete.
@@ -173,6 +314,8 @@ impl<S: Send + 'static> Executor<S> {
     /// The task is executed after all previously queued tasks have completed.
     /// Tasks are executed sequentially in the order they are queued,
     /// regardless of whether they are asynchronous or blocking.
+    /// 
+    /// This is a convenient wrapper around [spawn](Executor::spawn).
     /// 
     /// # Panics
     /// Panics if the task or any previous task panicked,
@@ -204,8 +347,10 @@ impl<S: Send + 'static> Executor<S> {
     /// Tasks are executed sequentially in the order they are queued,
     /// regardless of whether they are asynchronous or blocking.
     /// 
-    /// The blocking task is executed using blocking thread pool
+    /// The blocking task is executed using the runtime's blocking thread pool
     /// to avoid blocking the asynchronous runtime.
+    /// 
+    /// This is a convenient wrapper around [spawn_blocking](Executor::spawn_blocking).
     /// 
     /// # Panics
     /// Panics if the task or any previous task panicked,
@@ -231,75 +376,42 @@ impl<S: Send + 'static> Executor<S> {
         self.spawn_blocking(task).await.unwrap_or_else(|e| e.panic())
     }
 
-    /// Queues an asynchronous task for sequential execution, 
-    /// returning a [`TaskHandle`] to wait for it to complete.
-    /// 
-    /// The task is executed after all previously queued tasks have completed.
-    /// Tasks are executed sequentially in the order they are queued,
-    /// regardless of whether they are asynchronous or blocking.
-    /// 
-    /// # Panics
-    /// Panics if this method is called outside Tokio runtime.
-    /// 
-    /// # Examples
-    /// ```
-    /// # fn main() {
-    /// # tokio_test::block_on(async {
-    /// let executor = async_sequential::Executor::new(Vec::new());
-    /// 
-    /// executor.spawn(move |state| Box::pin(async move {
-    ///     state.push(0);
-    /// }));
-    /// # });
-    /// # }
-    /// ```
-    pub fn spawn<T, R>(&self, task: T) -> TaskHandle<R>
-    where
-        T: for<'a> FnOnce(&'a mut S) -> Pin<Box<dyn Future<Output = R> + Send + 'a>> + Send + 'static,
-        R: Send + 'static,
-    {
-        let (task, task_result, task_controller) = build_async_task(task);
-        match self.worker.send(task) {
-            Ok(worker_state) => TaskHandle::new(task_result, task_controller, worker_state),
-            Err(WorkerSendError::PrevTaskPanic { panic_msg }) => TaskHandle::prev_task_panicked(panic_msg),
+
+    fn send(&self, task: Task<S>) -> Result<Arc<WorkerState>, WorkerSendError> {
+        let mut locked_worker = self.worker.lock().unwrap();
+
+        if let Some(Worker::Started { ref worker_handle }) = *locked_worker {
+            return worker_handle.send(task);
         }
+
+        let Some(Worker::Unstarted { state }) = locked_worker.take() else {
+            unreachable!("illegal closed executor")
+        };
+
+        let worker_handle = spawn_worker(state);
+        let worker_state = match worker_handle.send(task) {
+            Ok(worker_state) => worker_state,
+            Err(WorkerSendError::PrevTaskPanic { .. }) => unreachable!(),
+        };
+        *locked_worker = Some(Worker::Started { worker_handle });
+        Ok(worker_state)
     }
 
-    /// Queues a blocking task for sequential execution, 
-    /// returning a [`TaskHandle`] to wait for it to complete.
-    ///
-    /// The task is executed after all previously queued tasks have completed.
-    /// Tasks are executed sequentially in the order they are queued,
-    /// regardless of whether they are asynchronous or blocking.
-    /// 
-    /// The blocking task is executed using blocking thread pool
-    /// to avoid blocking the asynchronous runtime.
-    /// 
-    /// # Panics
-    /// Panics if this method is called outside Tokio runtime.
-    /// 
-    /// # Examples
-    /// ```
-    /// # fn main() {
-    /// # tokio_test::block_on(async {
-    /// let executor = async_sequential::Executor::new(Vec::new());
-    /// 
-    /// executor.spawn_blocking(move |state| {
-    ///     state.push(0);
-    /// });
-    /// # });
-    /// # }
-    /// ```
-    pub fn spawn_blocking<T, R>(&self, task: T) -> TaskHandle<R>
-    where
-        T: (FnOnce(&mut S) -> R) + Send + 'static,
-        R: Send + 'static,
-    {
-        let (task, task_result, task_controller) = build_blocking_task(task);
-        match self.worker.send(task) {
-            Ok(worker_state) => TaskHandle::new(task_result, task_controller, worker_state),
-            Err(WorkerSendError::PrevTaskPanic { panic_msg }) => TaskHandle::prev_task_panicked(panic_msg),
+    fn sender(&self) -> WorkerTaskSender<S> {
+        let mut locked_worker = self.worker.lock().unwrap();
+
+        if let Some(Worker::Started { ref worker_handle }) = *locked_worker {
+            return worker_handle.sender()
         }
+
+        let Some(Worker::Unstarted { state }) = locked_worker.take() else {
+            unreachable!("illegal closed executor")
+        };
+
+        let worker_handle = spawn_worker(state);
+        let task_sender = worker_handle.sender();
+        *locked_worker = Some(Worker::Started { worker_handle });
+        task_sender
     }
 }
 
@@ -307,6 +419,18 @@ impl<S: Default> Default for Executor<S> {
 
     fn default() -> Self {
         Self::new(S::default())
+    }
+}
+
+impl<S> Drop for Executor<S> {
+
+    fn drop(&mut self) {
+        let worker = self.worker.lock().ok().and_then(|mut w| w.take());
+        match worker {
+            Some(Worker::Unstarted { .. }) => {},
+            Some(Worker::Started { worker_handle }) => worker_handle.abort(),
+            None => {},
+        }
     }
 }
 

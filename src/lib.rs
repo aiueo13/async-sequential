@@ -1,10 +1,10 @@
 mod internal;
 mod executor_join_error;
 mod executor;
-mod task_spawner;
 mod task_canceller;
 mod task_error;
 mod task_handle;
+mod task_spawner;
 
 use internal::*;
 

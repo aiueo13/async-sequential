@@ -10,7 +10,7 @@ pub struct TaskError {
 enum Repr {
     ExecutorAborted,
     ExecutorCancelled,
-    ExecutorJoined,
+    TaskSpawnerUnavailable,
     TaskCancelled,
     TaskPanic {
         panic: PanicPayload
@@ -34,12 +34,12 @@ impl TaskError {
         Self { repr: Repr::ExecutorAborted }
     }
 
-    pub(crate) fn worker_joined() -> Self {
-        Self { repr: Repr::ExecutorJoined }
-    }
-
     pub(crate) fn worker_cancelled() -> Self {
         Self { repr: Repr::ExecutorCancelled }
+    }
+
+    pub(crate) fn worker_task_sender_unavailable() -> Self {
+        Self { repr: Repr::TaskSpawnerUnavailable }
     }
 
     pub(crate) fn task_cancelled() -> Self {
@@ -49,8 +49,8 @@ impl TaskError {
     pub(crate) fn panic(self) -> ! {
         match self.repr {
             Repr::ExecutorAborted => panic!("executor was aborted"),
-            Repr::ExecutorJoined => panic!("executor was joined"),
             Repr::ExecutorCancelled => panic!("executor was cancelled"),
+            Repr::TaskSpawnerUnavailable => panic!("task spawner was unavailable"),
             Repr::TaskCancelled => panic!("task was cancelled"),
             Repr::TaskPanic { panic } => panic.resume_unwind(),
             Repr::PrevTaskPanic { panic_msg } => {
@@ -69,7 +69,7 @@ impl TaskError {
     /// if the error was caused by the task itself panicking.
     ///
     /// The returned panic payload can be passed to
-    /// [`std::panic::resume_unwind`] to resume the original panic.
+    /// [std::panic::resume_unwind] to resume the original panic.
     ///
     /// # Panics
     /// Panics if the error was not caused by the task itself panicking.
@@ -78,11 +78,16 @@ impl TaskError {
     pub fn into_panic(self) -> Box<dyn Any + Send + 'static> {
         match self.repr {
             Repr::ExecutorAborted => panic!("cannot extract panic payload: executor was aborted"),
-            Repr::ExecutorJoined => panic!("cannot extract panic payload: executor was joined"),
             Repr::ExecutorCancelled => panic!("cannot extract panic payload: executor was cancelled"),
+            Repr::TaskSpawnerUnavailable => panic!("cannot extract panic payload: task spawner was unavailable"),
             Repr::TaskCancelled => panic!("cannot extract panic payload: task was cancelled"),
             Repr::TaskPanic { panic } => panic.into_inner(),
-            Repr::PrevTaskPanic { .. } => panic!("cannot extract panic payload: a previous task panicked"),
+            Repr::PrevTaskPanic { panic_msg } => {
+                match panic_msg {
+                    Some(panic_msg) => panic!("cannot extract panic payload: a previous task panicked: {panic_msg}"),
+                    None => panic!("cannot extract panic payload: a previous task panicked"),
+                }
+            },
         }
     }
 
@@ -90,7 +95,7 @@ impl TaskError {
     /// if the error was caused by the task itself panicking.
     ///
     /// The returned panic payload can be passed to
-    /// [`std::panic::resume_unwind`] to resume the original panic.
+    /// [std::panic::resume_unwind] to resume the original panic.
     ///
     /// # Errors
     /// Returns the original error if it was not caused by the task itself panicking.
@@ -100,38 +105,38 @@ impl TaskError {
         match self.repr {
             Repr::ExecutorAborted => Err(self),
             Repr::ExecutorCancelled => Err(self),
-            Repr::ExecutorJoined => Err(self),
+            Repr::TaskSpawnerUnavailable => Err(self),
             Repr::TaskCancelled => Err(self),
             Repr::TaskPanic { panic } => Ok(panic.into_inner()),
             Repr::PrevTaskPanic { .. } => Err(self),
         }
     }
 
-    /// Returns `true` if the error was caused by the task being cancelled.
+    /// Returns true if the error was caused by the task was cancelled, either explicitly or implicitly.
     /// 
-    /// This returns `true` if any of the following are `true`:
-    /// - [`is_executor_aborted`](Self::is_executor_aborted)
-    /// - [`is_executor_cancelled`](Self::is_executor_cancelled)
-    /// - [`is_executor_joined`](Self::is_executor_joined)
-    /// - [`is_task_cancelled`](Self::is_task_cancelled)
+    /// It occurs when any of the following are true:
+    /// - [is_executor_aborted](Self::is_executor_aborted)
+    /// - [is_executor_cancelled](Self::is_executor_cancelled)
+    /// - [is_task_spawner_unavailable](Self::is_task_spawner_unavailable)
+    /// - [is_task_cancelled](Self::is_task_cancelled)
     pub fn is_cancelled(&self) -> bool {
         self.is_executor_aborted() ||
-        self.is_executor_cancelled() || 
-        self.is_executor_joined() ||
+        self.is_executor_cancelled() ||
+        self.is_task_spawner_unavailable() || 
         self.is_task_cancelled() 
     }
 
-    /// Returns `true` if the error was caused by the task or any previous task panicking.
+    /// Returns true if the error was caused by the task or any previous task panicking.
     /// 
-    /// This returns `true` if any of the following are `true`:
-    /// - [`is_task_panic`](Self::is_task_panic)
-    /// - [`is_prev_task_panic`](Self::is_prev_task_panic)
+    /// It occurs when any of the following are true:
+    /// - [is_task_panic](Self::is_task_panic)
+    /// - [is_prev_task_panic](Self::is_prev_task_panic)
     pub fn is_panic(&self) -> bool {
         self.is_task_panic() ||
         self.is_prev_task_panic()
     }
 
-    /// Returns `true` if the error was caused by the task panicking.
+    /// Returns true if the error was caused by the task panicking.
     /// 
     /// # Examples
     /// ```
@@ -154,7 +159,7 @@ impl TaskError {
         matches!(&self.repr, Repr::TaskPanic { .. })
     }
 
-    /// Returns `true` if the error was caused by any previous task panicking.
+    /// Returns true if the error was caused by any previous task panicking.
     /// 
     /// # Examples
     /// ```
@@ -188,14 +193,14 @@ impl TaskError {
         matches!(&self.repr, Repr::PrevTaskPanic { .. })
     }
 
-    /// Returns `true` if the error was caused by the [`Executor`](crate::Executor) being aborted.
+    /// Returns true if the error was caused by the [Executor](crate::Executor) being aborted.
     /// 
     /// It occurs when the task is aborted as a result of the executor being dropped.  
     /// 
     /// Note that blocking tasks are not asynchronous, so if one is already running,
     /// aborting it only detaches the task from the executor;
     /// it continues running normally.
-    /// In this case, its [`TaskHandle`](crate::TaskHandle) does not return this error.
+    /// In this case, its [TaskHandle](crate::TaskHandle) does not return this error.
     /// 
     /// # Examples
     /// ```
@@ -214,10 +219,10 @@ impl TaskError {
     /// let err = running.await.unwrap_err();
     /// assert!(err.is_cancelled());
     /// assert!(err.is_executor_aborted());
-    /// assert!(!err.is_executor_joined());
-    /// assert!(!err.is_executor_cancelled());
-    /// assert!(!err.is_task_cancelled());
-    /// assert!(!err.is_panic());
+    /// # assert!(!err.is_task_spawner_unavailable());
+    /// # assert!(!err.is_executor_cancelled());
+    /// # assert!(!err.is_task_cancelled());
+    /// # assert!(!err.is_panic());
     /// # });
     /// # }
     /// ```
@@ -250,10 +255,10 @@ impl TaskError {
     /// let err = queued.await.unwrap_err();
     /// assert!(err.is_cancelled());
     /// assert!(err.is_executor_aborted());
-    /// assert!(!err.is_executor_joined());
-    /// assert!(!err.is_executor_cancelled());
-    /// assert!(!err.is_task_cancelled());
-    /// assert!(!err.is_panic());
+    /// # assert!(!err.is_task_spawner_unavailable());
+    /// # assert!(!err.is_executor_cancelled());
+    /// # assert!(!err.is_task_cancelled());
+    /// # assert!(!err.is_panic());
     /// # });
     /// # }
     /// ```
@@ -261,9 +266,9 @@ impl TaskError {
         matches!(&self.repr, Repr::ExecutorAborted)
     }
 
-    /// Returns `true` if the error was caused by the [`Executor`](crate::Executor) being cancelled.
+    /// Returns true if the error was caused by the [Executor](crate::Executor) being cancelled.
     /// 
-    /// It occurs when the task is cancelled as a result of [`Executor::cancel`](crate::Executor::cancel) being called.
+    /// It occurs when the task is cancelled as a result of [Executor::cancel](crate::Executor::cancel) being called.
     /// 
     /// # Examples
     /// ```
@@ -289,10 +294,10 @@ impl TaskError {
     /// let err = queued.await.unwrap_err();
     /// assert!(err.is_cancelled());
     /// assert!(err.is_executor_cancelled());
-    /// assert!(!err.is_executor_aborted());
-    /// assert!(!err.is_executor_joined());
-    /// assert!(!err.is_task_cancelled());
-    /// assert!(!err.is_panic());
+    /// # assert!(!err.is_executor_aborted());
+    /// # assert!(!err.is_task_spawner_unavailable());
+    /// # assert!(!err.is_task_cancelled());
+    /// # assert!(!err.is_panic());
     /// # });
     /// # }
     /// ```
@@ -300,11 +305,13 @@ impl TaskError {
         matches!(&self.repr, Repr::ExecutorCancelled)
     }
 
-    /// Returns `true` if the error was caused by a task being submitted after the executor started joining.
+    /// Returns true if the error was caused by the task being spawned
+    /// after the [TaskSpawner] could no longer spawn tasks.
     /// 
-    /// It occurs when the task is cancelled as a result of
-    /// [`TaskSpawner::spawn`](crate::TaskSpawner::spawn) or [`TaskSpawner::spawn_blocking`](crate::TaskSpawner::spawn_blocking)
-    /// being called after its [`Executor::join`](crate::Executor::join).
+    /// It occurs when the task is cancelled before the task is spawned by the TaskSpawner as a result of any of the following:
+    /// - [Executor] being aborted before spawning tasks.
+    /// - Executor being cancelled before spawning tasks.
+    /// - TaskSpawner being closed before spawning tasks.
     /// 
     /// # Examples
     /// ```
@@ -315,42 +322,43 @@ impl TaskError {
     /// 
     /// let executor = async_sequential::Executor::new(());
     /// 
-    /// let _running = executor.spawn(move |_| Box::pin(async move {
+    /// let _ = executor.spawn(move |_| Box::pin(async move {
     ///     sleep(Duration::from_secs(2)).await;
     /// }));
     /// 
     /// let spawner = executor.spawner();
     /// 
-    /// let rejected = spawn(async move {
+    /// let task = spawn(async move {
     ///     sleep(Duration::from_secs(1)).await;
     ///     spawner.spawn(move |_| Box::pin(async move {
     ///         unreachable!();
     ///     }))
     /// });
     /// 
+    /// executor.close_spawners();
     /// executor.join().await;
     /// 
     /// // The task was cancelled 
-    /// // because the executor was joined before the task was spawned.
-    /// let err = rejected.await.unwrap().await.unwrap_err();
+    /// // because the spawner was closed before the task was spawned.
+    /// let err = task.await.unwrap().await.unwrap_err();
     /// assert!(err.is_cancelled());
-    /// assert!(err.is_executor_joined());
-    /// assert!(!err.is_executor_aborted());
-    /// assert!(!err.is_executor_cancelled());
-    /// assert!(!err.is_task_cancelled());
-    /// assert!(!err.is_panic());
+    /// assert!(err.is_task_spawner_unavailable());
+    /// # assert!(!err.is_executor_aborted());
+    /// # assert!(!err.is_executor_cancelled());
+    /// # assert!(!err.is_task_cancelled());
+    /// # assert!(!err.is_panic());
     /// # });
     /// # }
     /// ```
-    pub fn is_executor_joined(&self) -> bool {
-        matches!(&self.repr, Repr::ExecutorJoined)
+    pub fn is_task_spawner_unavailable(&self) -> bool {
+        matches!(&self.repr, Repr::TaskSpawnerUnavailable)
     }
 
-    /// Returns `true` if the error was caused by the task being cancelled through its handle.
+    /// Returns true if the error was caused by the task being cancelled through its handle.
     /// 
     /// It occurs when the task is cancelled as a result of any of the following methods being called.
-    /// - [`TaskHandle::cancel`](crate::TaskHandle::cancel)
-    /// - [`TaskCanceller::cancel`](crate::TaskCanceller::cancel)
+    /// - [TaskHandle::cancel](crate::TaskHandle::cancel)
+    /// - [TaskCanceller::cancel](crate::TaskCanceller::cancel)
     /// 
     /// # Examples
     /// ```
@@ -376,26 +384,15 @@ impl TaskError {
     /// let err = queued.await.unwrap_err();
     /// assert!(err.is_cancelled());
     /// assert!(err.is_task_cancelled());
-    /// assert!(!err.is_executor_aborted());
-    /// assert!(!err.is_executor_joined());
-    /// assert!(!err.is_executor_cancelled());
-    /// assert!(!err.is_panic());
+    /// # assert!(!err.is_executor_aborted());
+    /// # assert!(!err.is_task_spawner_unavailable());
+    /// # assert!(!err.is_executor_cancelled());
+    /// # assert!(!err.is_panic());
     /// # });
     /// # }
     /// ```
     pub fn is_task_cancelled(&self) -> bool {
         matches!(&self.repr, Repr::TaskCancelled)
-    }
-
-
-    #[deprecated = "use `is_executor_aborted` instead"]
-    pub fn is_worker_aborted(&self) -> bool {
-        self.is_executor_aborted()
-    }
-
-    #[deprecated = "use `is_executor_cancelled` instead"]
-    pub fn is_worker_cancelled(&self) -> bool {
-        self.is_executor_cancelled()
     }
 }
 
@@ -404,8 +401,8 @@ impl fmt::Debug for TaskError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match &self.repr {
             Repr::ExecutorAborted => f.write_str("TaskError::ExecutorAborted"),
-            Repr::ExecutorJoined => f.write_str("TaskError::ExecutorJoined"),
             Repr::ExecutorCancelled => f.write_str("TaskError::ExecutorCancelled"),
+            Repr::TaskSpawnerUnavailable => f.write_str("TaskError::TaskSpawnerUnavailable"),
             Repr::TaskCancelled => f.write_str("TaskError::TaskCancelled"),
             Repr::PrevTaskPanic { panic_msg } => {
                 f.debug_struct("TaskError::PreviousTaskPanic")
@@ -426,8 +423,8 @@ impl fmt::Display for TaskError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match &self.repr {
             Repr::ExecutorAborted => f.write_str("executor was aborted"),
-            Repr::ExecutorJoined => f.write_str("executor was joined"),
             Repr::ExecutorCancelled => f.write_str("executor was cancelled"),
+            Repr::TaskSpawnerUnavailable => f.write_str("task spawner was unavailable"),
             Repr::TaskCancelled => f.write_str("task was cancelled"),
             Repr::PrevTaskPanic { panic_msg } => {
                 match panic_msg {
@@ -450,13 +447,6 @@ impl std::error::Error for TaskError {}
 impl From<TaskError> for std::io::Error {
 
     fn from(value: TaskError) -> std::io::Error {
-        std::io::Error::other(match value.repr {
-            Repr::ExecutorCancelled => "executor was cancelled",
-            Repr::ExecutorJoined => "executor was joined",
-            Repr::ExecutorAborted => "executor was aborted",
-            Repr::TaskCancelled => "task was cancelled",
-            Repr::PrevTaskPanic { .. } => "previous task panicked",
-            Repr::TaskPanic { .. } => "task panicked",
-        })
+        std::io::Error::other(value)
     }
 }

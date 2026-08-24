@@ -17,6 +17,13 @@ impl<T> OnceTake<T> {
         }
     }
 
+    pub const fn empty() -> Self {
+        Self {
+            taken: AtomicBool::new(true),
+            value: UnsafeCell::new(None),
+        }
+    }
+
     pub fn take(&self) -> Option<T> {
         if self.taken.swap(true, Ordering::AcqRel) {
             None
@@ -25,6 +32,16 @@ impl<T> OnceTake<T> {
             // SAFETY:
             // `taken` を true に変更できたスレッドだけが `value` にアクセスする。
             unsafe { (*self.value.get()).take() }
+        }
+    }
+}
+
+impl<T> From<Option<T>> for OnceTake<T> {
+
+    fn from(value: Option<T>) -> Self {
+        match value {
+            Some(value) => Self::new(value),
+            None => Self::empty(),
         }
     }
 }
