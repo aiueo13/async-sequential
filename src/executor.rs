@@ -186,20 +186,6 @@ impl<S> Executor<S> {
         }
     }
 
-    /// Closes all [TaskSpawner]s currently associated with this Executor.
-    ///
-    /// After this method is called, all existing TaskSpawners can no longer spawn new tasks.
-    /// Tasks that have already been queued or are currently running are unaffected.
-    /// TaskSpawners obtained after this call are also unaffected.
-    pub fn close_spawners(&self) {
-        let mut worker = self.worker.lock().unwrap();
-        match &mut *worker {
-            Some(Worker::Unstarted { .. }) => {},
-            Some(Worker::Started { worker_handle }) => worker_handle.close_task_senders(),
-            None => unreachable!("illegal closed executor"),
-        }
-    }
-
     /// Returns true if a task previously executed by this Executor has panicked.
     /// 
     /// Once a task has panicked,
@@ -212,6 +198,20 @@ impl<S> Executor<S> {
         match &*worker {
             Some(Worker::Unstarted { .. }) => false,
             Some(Worker::Started { worker_handle }) => worker_handle.has_panicked(),
+            None => unreachable!("illegal closed executor"),
+        }
+    }
+
+    /// Closes all [TaskSpawner]s currently associated with this Executor.
+    ///
+    /// After this method is called, all existing TaskSpawners can no longer spawn new tasks.
+    /// Tasks that have already been queued or are currently running are unaffected.
+    /// TaskSpawners obtained after this call are also unaffected.
+    pub fn close_spawners(&self) {
+        let mut worker = self.worker.lock().unwrap();
+        match &mut *worker {
+            Some(Worker::Unstarted { .. }) => {},
+            Some(Worker::Started { worker_handle }) => worker_handle.close_task_senders(),
             None => unreachable!("illegal closed executor"),
         }
     }
