@@ -31,15 +31,17 @@ use std::{future::Future, pin::Pin, sync::{Arc, Mutex as SyncMutex}};
 ///
 /// let spawner = executor.spawner();
 /// spawn(async move {
-///     spawner.spawn_blocking(move |state| {
+///     let task_handle1 = spawner.spawn_blocking(move |state| {
 ///         state.push(2);
+///         "hello"
 ///     });
-///
-///     let task_handle = spawner.spawn(move |state| Box::pin(async move {
+///     let task_handle2 = spawner.spawn(move |state| Box::pin(async move {
 ///         state.push(3);
-///         "hello world"
+///         "world"
 ///     }));
-///     assert_eq!(task_handle.await.unwrap(), "hello world");
+/// 
+///     assert_eq!(task_handle1.await.unwrap(), "hello");
+///     assert_eq!(task_handle2.await.unwrap(), "world");
 /// });
 ///
 /// // Wait for all tasks to complete.
