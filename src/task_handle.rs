@@ -11,8 +11,6 @@ pub struct TaskHandle<R> {
 }
 
 enum Repr<R> {
-    WorkerAlreadyAborted,
-    WorkerAlreadyCancelled,
     WorkerTaskSenderUnavailable,
     PrevTaskPanic {
         panic_msg: Option<Arc<String>>
@@ -25,14 +23,6 @@ enum Repr<R> {
 }
 
 impl<R> TaskHandle<R> {
-
-    pub(crate) fn worker_already_aborted() -> Self {
-        Self { repr: Repr::WorkerAlreadyAborted }
-    }
-
-    pub(crate) fn worker_already_cancelled() -> Self {
-        Self { repr: Repr::WorkerAlreadyCancelled }
-    }
 
     pub(crate) fn worker_task_sender_unavailable() -> Self {
         Self { repr: Repr::WorkerTaskSenderUnavailable }
@@ -102,8 +92,6 @@ impl<R> TaskHandle<R> {
     /// ```
     pub fn cancel(&self) -> bool {
         match &self.repr {
-            Repr::WorkerAlreadyAborted |
-            Repr::WorkerAlreadyCancelled |
             Repr::WorkerTaskSenderUnavailable |
             Repr::PrevTaskPanic { .. } => false,
             Repr::Active { task_controller, worker_state, .. } => {
@@ -146,8 +134,6 @@ impl<R> TaskHandle<R> {
     /// ```
     pub fn canceller(&self) -> TaskCanceller {
         match &self.repr {
-            Repr::WorkerAlreadyAborted |
-            Repr::WorkerAlreadyCancelled |
             Repr::WorkerTaskSenderUnavailable |
             Repr::PrevTaskPanic { .. } => TaskCanceller::inactive(),
             Repr::Active { task_controller, worker_state, .. } => {
@@ -177,14 +163,8 @@ impl<R> Future for TaskHandle<R> {
     ) -> Poll<Self::Output> {
 
         match &mut self.repr {
-            Repr::WorkerAlreadyAborted => {
-                Poll::Ready(Err(TaskError::worker_aborted()))
-            },
             Repr::WorkerTaskSenderUnavailable => {
                 Poll::Ready(Err(TaskError::worker_task_sender_unavailable()))
-            },
-            Repr::WorkerAlreadyCancelled => {
-                Poll::Ready(Err(TaskError::worker_cancelled()))
             },
             Repr::PrevTaskPanic { panic_msg } => {
                 Poll::Ready(Err(TaskError::prev_task_panicked(panic_msg.take())))

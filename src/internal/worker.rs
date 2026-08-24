@@ -182,20 +182,20 @@ pub struct WorkerTaskSender<S> {
 impl<S: Send + 'static> WorkerTaskSender<S> {
 
     pub fn send(&self, task: Task<S>) -> Result<Arc<WorkerState>, WorkerTaskSenderSendError> {
-        let locked_task_tx = self.task_tx.lock().unwrap_or_else(|e| e.into_inner());
-        let Some(ref task_tx) = *locked_task_tx else {
-            return Err(WorkerTaskSenderSendError::WorkerTaskSenderUnavailable)
+        let result = {
+            let locked_task_tx = self.task_tx.lock().unwrap_or_else(|e| e.into_inner());
+            let Some(ref task_tx) = *locked_task_tx else {
+                return Err(WorkerTaskSenderSendError::Unavailable)
+            };
+            task_tx.send(task)
         };
         
-        match task_tx.send(task) {
+        match result {
             Ok(_) => Ok(Arc::clone(&self.worker_state)),
             Err(_) => {
                 let worker_flags = self.worker_state.flags();
-                if worker_flags.is_aborted() {
-                    Err(WorkerTaskSenderSendError::WorkerAborted)
-                }
-                else if worker_flags.is_cancelled() {
-                    Err(WorkerTaskSenderSendError::WorkerCancelled)
+                if worker_flags.is_aborted() || worker_flags.is_cancelled() {
+                    Err(WorkerTaskSenderSendError::Unavailable)
                 }
                 else {
                     let panic_msg = self.worker_state.task_panic_msg();
@@ -327,7 +327,5 @@ pub enum WorkerTaskSenderSendError {
     PrevTaskPanic {
         panic_msg: Option<Arc<String>>,
     },
-    WorkerAborted,
-    WorkerCancelled,
-    WorkerTaskSenderUnavailable,
+    Unavailable,
 }
