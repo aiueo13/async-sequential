@@ -161,7 +161,7 @@ impl<S> Executor<S> {
     /// Panics if any task panicked before or during this method,
     /// or if this method is called outside Tokio runtime.
     pub async fn cancel_and_join(self) -> S {
-        self.try_cancel_and_join().await.unwrap_or_else(|e| e.panic())
+        self.cancel_and_try_join().await.unwrap_or_else(|e| e.panic())
     }
 
     /// Cancels all queued tasks and prevents subsequent tasks from being queued,
@@ -175,7 +175,7 @@ impl<S> Executor<S> {
     /// 
     /// # Panics
     /// Panics if this method is called outside Tokio runtime.
-    pub async fn try_cancel_and_join(self) -> Result<S, ExecutorJoinError> {
+    pub async fn cancel_and_try_join(self) -> Result<S, ExecutorJoinError> {
         let worker = self.worker.lock().unwrap().take();
         match worker {
             Some(Worker::Unstarted { state, .. }) => Ok(state),
@@ -451,7 +451,7 @@ mod tests {
         require_send_static(executor.cancel_and_join());
 
         let executor = Executor::new(());
-        require_send_static(executor.try_cancel_and_join());
+        require_send_static(executor.cancel_and_try_join());
 
         let executor = Executor::new(());
         require_send_static(executor.spawn(|_| Box::pin(async {})));

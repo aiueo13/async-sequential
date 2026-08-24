@@ -278,14 +278,14 @@ mod tests {
             assert!(err.is_task_spawner_unavailable());
         });
 
-        assert!(executor.try_cancel_and_join().await.is_err());
+        assert!(executor.cancel_and_try_join().await.is_err());
     }
 
     #[tokio::test]
     async fn test9() {
         let executor = Executor::new(0);
         let _spawner = executor.spawner();
-        assert!(executor.try_cancel_and_join().await.is_ok());
+        assert!(executor.cancel_and_try_join().await.is_ok());
     }
 
     #[tokio::test]

@@ -5,7 +5,7 @@ use tokio::{spawn, sync::{mpsc, watch}, task::{AbortHandle, JoinHandle, JoinErro
 
 pub fn spawn_worker<S: Send + 'static>(mut state: S) -> WorkerHandle<S> {
     let (task_tx, mut task_rx) = mpsc::unbounded_channel::<Task<S>>();
-    let task_tx_for_task_senders = SyncMutex::new(Arc::new(SyncMutex::new(Some(task_tx.clone()))));
+    let task_tx_for_task_senders = Arc::new(SyncMutex::new(Some(task_tx.clone())));
     let worker_state = Arc::new(WorkerState::new());
     let (panic_sender_tx, mut panic_sender_rx) = watch::channel(None);
 
@@ -90,12 +90,12 @@ pub struct WorkerHandle<S> {
     join_handle: JoinHandle<Result<S, WorkerJoinError>>,
     worker_state: Arc<WorkerState>,
     task_tx: mpsc::UnboundedSender<Task<S>>,
-    task_tx_for_task_senders: SyncMutex<Arc<SyncMutex<Option<mpsc::UnboundedSender<Task<S>>>>>>,
+    task_tx_for_task_senders: Arc<SyncMutex<Option<mpsc::UnboundedSender<Task<S>>>>>,
 }
 
 impl<S> WorkerHandle<S> {
 
-    pub fn abort(self) {
+    pub fn abort(mut self) {
         if !self.worker_handle.is_finished() {
             self.worker_state.set_aborted();
             self.worker_handle.abort();
@@ -107,7 +107,7 @@ impl<S> WorkerHandle<S> {
         drop(self.task_tx);
     }
 
-    pub fn cancel(self) {
+    pub fn cancel(mut self) {
         if !self.worker_handle.is_finished() {
             self.worker_state.set_cancelled();
         }
@@ -118,7 +118,7 @@ impl<S> WorkerHandle<S> {
         drop(self.task_tx);
     }
     
-    pub async fn cancel_and_join(self) -> Result<S, WorkerJoinError> {
+    pub async fn cancel_and_join(mut self) -> Result<S, WorkerJoinError> {
         if !self.worker_handle.is_finished() {
             self.worker_state.set_cancelled();
         }
@@ -148,19 +148,15 @@ impl<S> WorkerHandle<S> {
         }
     }
 
-    pub fn close_task_senders(&self) {
-        let mut locked = self.task_tx_for_task_senders.lock().unwrap_or_else(|e| e.into_inner());
-        
+    pub fn close_task_senders(&mut self) {
         // 既存の WorkerTaskSender が保持する task_tx を削除する。
-        let task_tx = locked.lock().unwrap_or_else(|e| e.into_inner()).take();
-        *locked = Arc::new(SyncMutex::new(task_tx));
+        let task_tx = self.task_tx_for_task_senders.lock().unwrap_or_else(|e| e.into_inner()).take();
+        self.task_tx_for_task_senders = Arc::new(SyncMutex::new(task_tx));
     }
 
     pub fn sender(&self) -> WorkerTaskSender<S> {
-        let locked_task_tx = self.task_tx_for_task_senders.lock().unwrap_or_else(|e| e.into_inner());
-
         WorkerTaskSender {
-            task_tx: Arc::clone(&locked_task_tx),
+            task_tx: Arc::clone(&self.task_tx_for_task_senders),
             worker_state: Arc::clone(&self.worker_state)
         }
     }
@@ -169,7 +165,7 @@ impl<S> WorkerHandle<S> {
         match self.task_tx.send(task) {
             Ok(_) => Ok(Arc::clone(&self.worker_state)),
             Err(_) => {
-                // join や abort, cancel などは self を取るので、
+                // abort と cancel は self を取るので、
                 // send　の失敗の原因は過去のタスクのパニックに絞られる。
                 let panic_msg = self.worker_state.task_panic_msg();
                 Err(WorkerSendError::PrevTaskPanic { panic_msg })
@@ -181,15 +177,6 @@ impl<S> WorkerHandle<S> {
 pub struct WorkerTaskSender<S> {
     task_tx: Arc<SyncMutex<Option<mpsc::UnboundedSender<Task<S>>>>>,
     worker_state: Arc<WorkerState>,
-}
-
-impl<S> WorkerTaskSender<S> {
-
-    #[allow(unused)]
-    pub fn is_closed(&self) -> bool {
-        let locked_task_tx = self.task_tx.lock().unwrap_or_else(|e| e.into_inner());
-        locked_task_tx.is_some()
-    }
 }
 
 impl<S: Send + 'static> WorkerTaskSender<S> {

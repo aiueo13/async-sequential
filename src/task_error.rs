@@ -195,10 +195,10 @@ impl TaskError {
 
     /// Returns true if the error was caused by the [Executor](crate::Executor) being aborted.
     /// 
-    /// It occurs when the task is aborted as a result of the executor being dropped.  
+    /// It occurs when the task is aborted as a result of the Executor being dropped.  
     /// 
     /// Note that blocking tasks are not asynchronous, so if one is already running,
-    /// aborting it only detaches the task from the executor;
+    /// aborting it only detaches the task from the Executor;
     /// it continues running normally.
     /// In this case, its [TaskHandle](crate::TaskHandle) does not return this error.
     /// 
@@ -215,7 +215,7 @@ impl TaskError {
     /// drop(executor);
     /// 
     /// // The task was aborted 
-    /// // because the executor was dropped before the task completed.
+    /// // because the Executor was dropped before the task completed.
     /// let err = running.await.unwrap_err();
     /// assert!(err.is_cancelled());
     /// assert!(err.is_executor_aborted());

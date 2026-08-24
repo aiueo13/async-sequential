@@ -511,16 +511,16 @@ mod tests2 {
             state.push(1);
         });
 
-        let task_result = executor.execute(move |state| Box::pin(async move {
+        let task_result = executor.spawn(move |state| Box::pin(async move {
             state.push(identity(2).await);
             "hello"
-        })).await;
+        })).await.unwrap();
         assert_eq!(task_result, "hello");
 
-        let task_result = executor.execute_blocking(move |state| {
+        let task_result = executor.spawn_blocking(move |state| {
             state.push(3);
             "world"
-        }).await;
+        }).await.unwrap();
         assert_eq!(task_result, "world");
 
         let result = executor.join().await;
@@ -582,10 +582,10 @@ mod tests2 {
 
         for i in 0..c {
             if i % 2 == 0 {
-                executor.execute(move |state| Box::pin(async move { state.push(i); })).await;
+                executor.spawn(move |state| Box::pin(async move { state.push(i); })).await.unwrap();
             }
             else {
-                executor.execute_blocking(move |state| { state.push(i); }).await;
+                executor.spawn_blocking(move |state| { state.push(i); }).await.unwrap();
             }
         }
 
@@ -776,17 +776,19 @@ mod tests {
     async fn test2() {
         let se = Executor::new(0);
 
+        #[allow(unused_must_use)] {
         tokio::join!(
-            se.execute(|ctx| Box::pin(async{*ctx += 1;})),
-            se.execute(|ctx| Box::pin(async{*ctx += 1;})),
-            se.execute(|ctx| Box::pin(async{*ctx += 1;})),
-            se.execute_blocking(|ctx| {*ctx += 1;}),
-            se.execute_blocking(|ctx| {*ctx += 1;}),
-            se.execute_blocking(|ctx| {*ctx += 1;}),
-            se.execute_blocking(|ctx| {*ctx += 1;}),
-            se.execute_blocking(|ctx| {*ctx += 1;}),
-            se.execute_blocking(|ctx| {*ctx += 1;}),
+            se.spawn(|ctx| Box::pin(async{*ctx += 1;})),
+            se.spawn(|ctx| Box::pin(async{*ctx += 1;})),
+            se.spawn(|ctx| Box::pin(async{*ctx += 1;})),
+            se.spawn_blocking(|ctx| {*ctx += 1;}),
+            se.spawn_blocking(|ctx| {*ctx += 1;}),
+            se.spawn_blocking(|ctx| {*ctx += 1;}),
+            se.spawn_blocking(|ctx| {*ctx += 1;}),
+            se.spawn_blocking(|ctx| {*ctx += 1;}),
+            se.spawn_blocking(|ctx| {*ctx += 1;}),
         );
+        }
 
         let result = se.join().await;
 
@@ -803,10 +805,10 @@ mod tests {
             let se1 = Arc::clone(&se);
             let se2 = Arc::clone(&se);
             set.spawn(async move {
-                se1.execute(|ctx| Box::pin(async{*ctx += 1;})).await;
+                se1.spawn(|ctx| Box::pin(async{*ctx += 1;})).await.unwrap();
             });
             set.spawn(async move {
-                se2.execute_blocking(|ctx| {*ctx += 1;}).await;
+                se2.spawn_blocking(|ctx| {*ctx += 1;}).await.unwrap();
             });
         }
 
@@ -825,32 +827,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test5() {
-        let se = Executor::new(Vec::<&'static str>::new());
-
-        tokio::join!(
-            se.execute(|ctx| Box::pin(async {
-                ctx.push("1");
-                tokio::task::yield_now().await;
-                ctx.push("2");
-            })),
-            se.execute(|ctx| Box::pin(async {
-                ctx.push("3");
-            })),
-        );
-
-        let result = se.join().await;
-        assert_eq!(result, vec!["1", "2", "3"]);
-    }
-
-    #[tokio::test]
     #[should_panic]
     async fn test6() {
         let se = Executor::new(Vec::<&'static str>::new());
 
-        se.execute(|_ctx| Box::pin(async {
+        se.spawn(|_ctx| Box::pin(async {
             panic!()
-        })).await;
+        })).await.unwrap();
     }
 
     #[tokio::test]
@@ -858,9 +841,9 @@ mod tests {
     async fn test7() {
         let se = Executor::new(Vec::<&'static str>::new());
 
-        se.execute_blocking(|_ctx| {
+        se.spawn_blocking(|_ctx| {
             panic!()
-        }).await;
+        }).await.unwrap();
     }
 
     #[tokio::test]
