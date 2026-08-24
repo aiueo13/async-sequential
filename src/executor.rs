@@ -20,7 +20,7 @@ use std::{future::Future, pin::Pin, sync::{Arc, Mutex as SyncMutex}};
 /// # fn main() {
 /// # tokio_test::block_on(async {
 /// use std::time::Duration;
-/// use tokio::{spawn, time::sleep};
+/// use tokio::time::sleep;
 /// 
 /// let executor = async_sequential::Executor::new(Vec::new());
 ///
@@ -30,7 +30,7 @@ use std::{future::Future, pin::Pin, sync::{Arc, Mutex as SyncMutex}};
 /// }));
 ///
 /// let spawner = executor.spawner();
-/// spawn(async move {
+/// tokio::spawn(async move {
 ///     let task_handle1 = spawner.spawn_blocking(move |state| {
 ///         state.push(2);
 ///         "hello"
@@ -196,6 +196,22 @@ impl<S> Executor<S> {
         match &mut *worker {
             Some(Worker::Unstarted { .. }) => {},
             Some(Worker::Started { worker_handle }) => worker_handle.close_task_senders(),
+            None => unreachable!("illegal closed executor"),
+        }
+    }
+
+    /// Returns true if a task previously executed by this Executor has panicked.
+    /// 
+    /// Once a task has panicked,
+    /// [TaskHandle]s obtained from [spawn](Self::spawn) or [spawn_blocking](Self::spawn_blocking)
+    /// immediately return errors for which [TaskError::is_prev_task_panic] returns true
+    /// and [execute](Self::execute) or [execute_blocking](Self::execute_blocking) panic as well.
+    /// Because the state invariants may have been violated by the task's panic.
+    pub fn has_panicked(&self) -> bool {
+        let worker = self.worker.lock().unwrap();
+        match &*worker {
+            Some(Worker::Unstarted { .. }) => false,
+            Some(Worker::Started { worker_handle }) => worker_handle.has_panicked(),
             None => unreachable!("illegal closed executor"),
         }
     }

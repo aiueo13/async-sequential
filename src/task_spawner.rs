@@ -10,7 +10,7 @@ use std::pin::Pin;
 /// except that the returned [TaskHandle] immediately returns an error
 /// if this TaskSpawner can no longer spawn tasks,
 /// such as when the TaskSpawner has been closed
-/// or the [Executor] has been aborted or cancelled.
+/// or the associated [Executor] has been aborted or cancelled.
 /// In such cases, [TaskError::is_task_spawner_unavailable] returns true.
 /// 
 /// Note that [Executor::join] and [Executor::try_join] does not complete as long as any TaskSpawner remains alive.
@@ -27,6 +27,37 @@ impl<S> TaskSpawner<S> {
     }
 }
 
+impl<S> TaskSpawner<S> {
+
+    /// Returns true if this TaskSpawner can no longer spawn tasks.
+    ///
+    /// It occurs when the TaskSpawner has been closed
+    /// or the associated [Executor] has been aborted or cancelled.
+    /// From this point onward,
+    /// [TaskHandle]s obtained from [spawn](Self::spawn) or [spawn_blocking](Self::spawn_blocking)
+    /// immediately return errors for which [TaskError::is_task_spawner_unavailable] returns true.
+    pub fn is_unavailable(&self) -> bool {
+        self.sender.is_unavailable()
+    }
+
+    /// Returns true if a task previously executed by the associated [Executor] has panicked.
+    /// 
+    /// Once a task has panicked, while this TaskSpawner is not unavailable,
+    /// [TaskHandle]s obtained from [spawn](Self::spawn) or [spawn_blocking](Self::spawn_blocking)
+    /// immediately return errors for which [TaskError::is_prev_task_panic] returns true.
+    /// Because the state invariants may have been violated by the task's panic.
+    /// 
+    /// Returns None if the TaskSpawner is unavailable.
+    /// It occurs when the TaskSpawner has been closed
+    /// or the [Executor] has been aborted or cancelled.
+    /// From this point onward, 
+    /// [TaskHandle]s obtained from spawn or spawn_blocking
+    /// immediately return errors for which [TaskError::is_task_spawner_unavailable] returns true.
+    pub fn has_panicked(&self) -> Option<bool> {
+        self.sender.has_panicked()
+    }
+}
+
 impl<S: Send + 'static> TaskSpawner<S> {
 
     /// Queues an asynchronous task for sequential execution, 
@@ -40,7 +71,7 @@ impl<S: Send + 'static> TaskSpawner<S> {
     /// except that the returned TaskHandle immediately returns an error
     /// if this TaskSpawner can no longer spawn tasks,
     /// such as when the TaskSpawner has been closed
-    /// or the [Executor] has been aborted or cancelled.
+    /// or the associated [Executor] has been aborted or cancelled.
     /// In such cases, [TaskError::is_task_spawner_unavailable] returns true.
     /// 
     /// # Panics
@@ -74,7 +105,7 @@ impl<S: Send + 'static> TaskSpawner<S> {
     /// except that the returned TaskHandle immediately returns an error
     /// if this TaskSpawner can no longer spawn tasks,
     /// such as when the TaskSpawner has been closed
-    /// or the [Executor] has been aborted or cancelled.
+    /// or the associated [Executor] has been aborted or cancelled.
     /// In such cases, [TaskError::is_task_spawner_unavailable] returns true.
     /// 
     /// # Panics
@@ -304,13 +335,90 @@ mod tests {
     #[tokio::test]
     async fn test12() {
         let executor = Executor::new(0);
-        executor.spawn(|_| Box::pin(async { panic!() }));
+        
         let spawner = executor.spawner();
+
+        assert!(!spawner.has_panicked().unwrap());
+        assert!(!spawner.is_unavailable());
+        executor.spawn(|_| Box::pin(async { panic!() }));
 
         let h = spawner.spawn(|_| Box::pin(async {}));
         assert!(h.await.unwrap_err().is_prev_task_panic());
 
+        assert!(!spawner.is_unavailable());
+        assert!(spawner.has_panicked().unwrap());
         executor.close_spawners();
+        assert!(spawner.is_unavailable());
+        assert!(spawner.has_panicked().is_none());
+
+        let h = spawner.spawn(|_| Box::pin(async {}));
+        assert!(h.await.unwrap_err().is_task_spawner_unavailable());
+    }
+
+    #[tokio::test]
+    async fn test13() {
+        let executor = Executor::new(0);
+        
+        let spawner = executor.spawner();
+
+        assert!(!spawner.has_panicked().unwrap());
+        assert!(!spawner.is_unavailable());
+        executor.spawn(|_| Box::pin(async { panic!() }));
+
+        let h = spawner.spawn(|_| Box::pin(async {}));
+        assert!(h.await.unwrap_err().is_prev_task_panic());
+
+        assert!(!spawner.is_unavailable());
+        assert!(spawner.has_panicked().unwrap());
+        drop(executor);
+        assert!(spawner.is_unavailable());
+        assert!(spawner.has_panicked().is_none());
+
+        let h = spawner.spawn(|_| Box::pin(async {}));
+        assert!(h.await.unwrap_err().is_task_spawner_unavailable());
+    }
+
+    #[tokio::test]
+    async fn test14() {
+        let executor = Executor::new(0);
+        
+        let spawner = executor.spawner();
+
+        assert!(!spawner.has_panicked().unwrap());
+        assert!(!spawner.is_unavailable());
+        executor.spawn(|_| Box::pin(async { panic!() }));
+
+        let h = spawner.spawn(|_| Box::pin(async {}));
+        assert!(h.await.unwrap_err().is_prev_task_panic());
+
+        assert!(!spawner.is_unavailable());
+        assert!(spawner.has_panicked().unwrap());
+        executor.cancel();
+        assert!(spawner.is_unavailable());
+        assert!(spawner.has_panicked().is_none());
+
+        let h = spawner.spawn(|_| Box::pin(async {}));
+        assert!(h.await.unwrap_err().is_task_spawner_unavailable());
+    }
+
+    #[tokio::test]
+    async fn test15() {
+        let executor = Executor::new(0);
+        
+        let spawner = executor.spawner();
+
+        assert!(!spawner.has_panicked().unwrap());
+        assert!(!spawner.is_unavailable());
+        executor.spawn(|_| Box::pin(async { panic!() }));
+
+        let h = spawner.spawn(|_| Box::pin(async {}));
+        assert!(h.await.unwrap_err().is_prev_task_panic());
+
+        assert!(!spawner.is_unavailable());
+        assert!(spawner.has_panicked().unwrap());
+        assert!(executor.cancel_and_try_join().await.is_err());
+        assert!(spawner.is_unavailable());
+        assert!(spawner.has_panicked().is_none());
 
         let h = spawner.spawn(|_| Box::pin(async {}));
         assert!(h.await.unwrap_err().is_task_spawner_unavailable());

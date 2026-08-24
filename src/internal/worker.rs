@@ -5,7 +5,6 @@ use tokio::{spawn, sync::{mpsc, watch}, task::{AbortHandle, JoinHandle, JoinErro
 
 pub fn spawn_worker<S: Send + 'static>(mut state: S) -> WorkerHandle<S> {
     let (task_tx, mut task_rx) = mpsc::unbounded_channel::<Task<S>>();
-    let task_tx_for_task_senders = Arc::new(SyncMutex::new(Some(task_tx.clone())));
     let worker_state = Arc::new(WorkerState::new());
     let (panic_sender_tx, mut panic_sender_rx) = watch::channel(None);
 
@@ -82,7 +81,7 @@ pub fn spawn_worker<S: Send + 'static>(mut state: S) -> WorkerHandle<S> {
         })
     };
 
-    WorkerHandle { worker_handle, join_handle, worker_state, task_tx, task_tx_for_task_senders }
+    WorkerHandle::new(worker_handle, join_handle, worker_state, task_tx)
 }
 
 pub struct WorkerHandle<S> {
@@ -90,10 +89,25 @@ pub struct WorkerHandle<S> {
     join_handle: JoinHandle<Result<S, WorkerJoinError>>,
     worker_state: Arc<WorkerState>,
     task_tx: mpsc::UnboundedSender<Task<S>>,
-    task_tx_for_task_senders: Arc<SyncMutex<Option<mpsc::UnboundedSender<Task<S>>>>>,
+    shared_task_senders_ctx: Arc<SyncMutex<Option<WorkerTaskSenderCtx<S>>>>,
 }
 
 impl<S> WorkerHandle<S> {
+
+    fn new(
+        worker_handle: AbortHandle,
+        join_handle: JoinHandle<Result<S, WorkerJoinError>>,
+        worker_state: Arc<WorkerState>,
+        task_tx: mpsc::UnboundedSender<Task<S>>,
+    ) -> Self {
+
+        let shared_task_senders_ctx = Arc::new(SyncMutex::new(Some(WorkerTaskSenderCtx {
+            task_tx: task_tx.clone(),
+            worker_handle: worker_handle.clone()
+        })));
+
+        Self { worker_handle, join_handle, worker_state, task_tx, shared_task_senders_ctx }
+    }
 
     pub fn abort(mut self) {
         if !self.worker_handle.is_finished() {
@@ -103,7 +117,7 @@ impl<S> WorkerHandle<S> {
 
         // 全ての task_tx を破棄する。
         self.close_task_senders();
-        drop(self.task_tx_for_task_senders);
+        drop(self.shared_task_senders_ctx);
         drop(self.task_tx);
     }
 
@@ -114,7 +128,7 @@ impl<S> WorkerHandle<S> {
 
         // 全ての task_tx を破棄する。
         self.close_task_senders();
-        drop(self.task_tx_for_task_senders);
+        drop(self.shared_task_senders_ctx);
         drop(self.task_tx);
     }
     
@@ -125,7 +139,7 @@ impl<S> WorkerHandle<S> {
 
         // 全ての task_tx を破棄する。
         self.close_task_senders();
-        drop(self.task_tx_for_task_senders);
+        drop(self.shared_task_senders_ctx);
         drop(self.task_tx);
 
         match self.join_handle.await {
@@ -136,9 +150,9 @@ impl<S> WorkerHandle<S> {
     }
 
     pub async fn join(self) -> Result<S, WorkerJoinError> {
-        // task_tx と task_tx_for_task_senders を破棄し、
-        // 全ての WorkerTaskSender が破棄されると join が終わるようにする。
-        drop(self.task_tx_for_task_senders);
+        // WorkerHandleが持っている全ての task_tx を破棄し、
+        // 全ての WorkerTaskSender が破棄された時点で join が終わるようにする。
+        drop(self.shared_task_senders_ctx);
         drop(self.task_tx);
 
         match self.join_handle.await {
@@ -149,14 +163,24 @@ impl<S> WorkerHandle<S> {
     }
 
     pub fn close_task_senders(&mut self) {
-        // 既存の WorkerTaskSender が保持する task_tx を削除する。
-        let task_tx = self.task_tx_for_task_senders.lock().unwrap_or_else(|e| e.into_inner()).take();
-        self.task_tx_for_task_senders = Arc::new(SyncMutex::new(task_tx));
+        // 既存の全ての WorkerTaskSender が保持する ctx を削除する。
+        let ctx = self.shared_task_senders_ctx.lock().unwrap_or_else(|e| e.into_inner()).take();
+        self.shared_task_senders_ctx = Arc::new(SyncMutex::new(ctx));
+    }
+
+    pub fn has_panicked(&self) -> bool {
+        if self.worker_handle.is_finished() {
+            let f = self.worker_state.flags();
+            !f.is_aborted() && !f.is_cancelled()
+        }
+        else {
+            false
+        }
     }
 
     pub fn sender(&self) -> WorkerTaskSender<S> {
         WorkerTaskSender {
-            task_tx: Arc::clone(&self.task_tx_for_task_senders),
+            shared_ctx: Arc::clone(&self.shared_task_senders_ctx),
             worker_state: Arc::clone(&self.worker_state)
         }
     }
@@ -174,20 +198,49 @@ impl<S> WorkerHandle<S> {
     }
 }
 
+struct WorkerTaskSenderCtx<S> {
+    task_tx: mpsc::UnboundedSender<Task<S>>,
+    worker_handle: AbortHandle,
+}
+
 pub struct WorkerTaskSender<S> {
-    task_tx: Arc<SyncMutex<Option<mpsc::UnboundedSender<Task<S>>>>>,
+    shared_ctx: Arc<SyncMutex<Option<WorkerTaskSenderCtx<S>>>>,
     worker_state: Arc<WorkerState>,
+}
+
+impl<S> WorkerTaskSender<S> {
+
+    pub fn is_unavailable(&self) -> bool {
+        let locked_ctx = self.shared_ctx.lock().unwrap_or_else(|e| e.into_inner());
+        locked_ctx.is_none()
+    }
+
+    pub fn has_panicked(&self) -> Option<bool> {
+        let locked_ctx = self.shared_ctx.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(locked_ctx) = locked_ctx.as_ref() else {
+            return None;
+        };
+
+        if locked_ctx.worker_handle.is_finished() {
+            let f = self.worker_state.flags();
+            let is_prev_task_panic = !f.is_aborted() && !f.is_cancelled();
+            Some(is_prev_task_panic)
+        }
+        else {
+            Some(false)
+        }
+    }
 }
 
 impl<S: Send + 'static> WorkerTaskSender<S> {
 
     pub fn send(&self, task: Task<S>) -> Result<Arc<WorkerState>, WorkerTaskSenderSendError> {
         let result = {
-            let locked_task_tx = self.task_tx.lock().unwrap_or_else(|e| e.into_inner());
-            let Some(ref task_tx) = *locked_task_tx else {
+            let locked_ctx = self.shared_ctx.lock().unwrap_or_else(|e| e.into_inner());
+            let Some(ref locked_ctx) = *locked_ctx else {
                 return Err(WorkerTaskSenderSendError::Unavailable)
             };
-            task_tx.send(task)
+            locked_ctx.task_tx.send(task)
         };
         
         match result {
