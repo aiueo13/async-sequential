@@ -3,11 +3,11 @@ use std::{fmt, panic};
 
 
 /// An error that occurred while waiting for a [JoinQueue] to complete.
-pub struct StatefulQueueJoinError {
+pub struct QueueJoinError {
     repr: internal::WorkerJoinError
 }
 
-impl StatefulQueueJoinError {
+impl QueueJoinError {
 
     pub(crate) fn panic(self) -> ! {
         match self.repr.into_panic_msg() {
@@ -17,14 +17,14 @@ impl StatefulQueueJoinError {
     }
 }
 
-impl From<internal::WorkerJoinError> for StatefulQueueJoinError {
+impl From<internal::WorkerJoinError> for QueueJoinError {
 
     fn from(value: internal::WorkerJoinError) -> Self {
         Self { repr: value }
     }
 }
 
-impl fmt::Debug for StatefulQueueJoinError {
+impl fmt::Debug for QueueJoinError {
 
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("QueueJoinError")
@@ -33,7 +33,7 @@ impl fmt::Debug for StatefulQueueJoinError {
     }
 }
 
-impl fmt::Display for StatefulQueueJoinError {
+impl fmt::Display for QueueJoinError {
 
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self.repr.panic_msg() {
@@ -43,11 +43,11 @@ impl fmt::Display for StatefulQueueJoinError {
     }
 }
 
-impl std::error::Error for StatefulQueueJoinError {}
+impl std::error::Error for QueueJoinError {}
 
-impl From<StatefulQueueJoinError> for std::io::Error {
+impl From<QueueJoinError> for std::io::Error {
 
-    fn from(value: StatefulQueueJoinError) -> std::io::Error {
+    fn from(value: QueueJoinError) -> std::io::Error {
         std::io::Error::other(value)
     }
 }

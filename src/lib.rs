@@ -7,7 +7,7 @@ mod task_handle;
 mod task_spawner;
 
 pub use join_queue::JoinQueue;
-pub use queue_join_error::StatefulQueueJoinError;
+pub use queue_join_error::QueueJoinError;
 pub use task_spawner::TaskSpawner;
 pub use task_canceller::TaskCanceller;
 pub use task_error::TaskError;

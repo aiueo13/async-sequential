@@ -115,7 +115,7 @@ impl<S> JoinQueue<S> {
     /// 
     /// # Panics
     /// Panics if this method is called outside Tokio runtime.
-    pub async fn try_join(self) -> Result<S, StatefulQueueJoinError> {
+    pub async fn try_join(self) -> Result<S, QueueJoinError> {
         let worker = self.worker.lock().unwrap().take();
         match worker {
             Some(Worker::Unstarted { state, .. }) => Ok(state),
@@ -190,7 +190,7 @@ impl<S> JoinQueue<S> {
     /// 
     /// # Panics
     /// Panics if this method is called outside Tokio runtime.
-    pub async fn cancel_and_try_join(self) -> Result<S, StatefulQueueJoinError> {
+    pub async fn cancel_and_try_join(self) -> Result<S, QueueJoinError> {
         let worker = self.worker.lock().unwrap().take();
         match worker {
             Some(Worker::Unstarted { state, .. }) => Ok(state),
