@@ -1,6 +1,6 @@
 use super::*;
 use std::{borrow::Cow, panic, sync::{Arc, Mutex as SyncMutex, OnceLock, atomic::{AtomicU8, Ordering}}};
-use tokio::{sync::mpsc, task::{AbortHandle, JoinHandle, JoinError, spawn, spawn_blocking}};
+use tokio::{sync::mpsc, task::{AbortHandle, JoinHandle, spawn, spawn_blocking}};
 
 
 pub fn spawn_worker<S: Send + 'static>(mut state: S) -> WorkerHandle<S> {
@@ -12,7 +12,7 @@ pub fn spawn_worker<S: Send + 'static>(mut state: S) -> WorkerHandle<S> {
         let worker_state = Arc::clone(&worker_state);
         let worker_join_handle = spawn(async move {
             while let Some(task) = task_rx.recv().await {
-                if worker_state.flags().is_cancelled() {
+                if worker_state.flags().has_cancel_started() {
                     break;
                 }
 
@@ -40,18 +40,20 @@ pub fn spawn_worker<S: Send + 'static>(mut state: S) -> WorkerHandle<S> {
     let join_handle = {
         let worker_state = Arc::clone(&worker_state);
         spawn(async move {
-            match worker_join_handle.await {
+            let result = worker_join_handle.await;
+            worker_state.set_finalize_started();
+            match result {
                 Ok(state) => Ok(state),
                 Err(e) => {
                     let mut task_panic_msg = None;
 
                     let worker_flags = worker_state.flags();
-                    let err = if worker_flags.is_cancelled() {
+                    let err = if worker_flags.has_cancel_started() {
                         // 現在の実装ではここに来ることはない。
                         // cancel は worker を panic　させないためである。
                         WorkerJoinError::with_msg("worker canncelled")
                     }
-                    else if worker_flags.is_aborted() {
+                    else if worker_flags.has_abort_started() {
                         // 現在の実装ではここに来ることはあるがこのエラーは使われない。
                         // abort は join を提供していないためである。
                         WorkerJoinError::with_msg("worker aborted")
@@ -108,7 +110,7 @@ impl<S> WorkerHandle<S> {
 
     pub fn abort(mut self) {
         if !self.worker_handle.is_finished() {
-            self.worker_state.set_aborted();
+            self.worker_state.set_abort_started();
             self.worker_handle.abort();
         }
 
@@ -120,7 +122,7 @@ impl<S> WorkerHandle<S> {
 
     pub fn cancel(mut self) {
         if !self.worker_handle.is_finished() {
-            self.worker_state.set_cancelled();
+            self.worker_state.set_cancel_started();
         }
 
         // 全ての task_tx を破棄する。
@@ -131,7 +133,7 @@ impl<S> WorkerHandle<S> {
     
     pub async fn cancel_and_join(mut self) -> Result<S, WorkerJoinError> {
         if !self.worker_handle.is_finished() {
-            self.worker_state.set_cancelled();
+            self.worker_state.set_cancel_started();
         }
 
         // 全ての task_tx を破棄する。
@@ -142,7 +144,15 @@ impl<S> WorkerHandle<S> {
         match self.join_handle.await {
             Ok(Ok(state)) => Ok(state),
             Ok(Err(e)) => Err(e),
-            Err(e) => Err(e.into())
+            Err(e) => {
+                let panic = e.try_into_panic().ok().map(PanicPayload::new);
+                if let Some(msg) = panic.as_ref().and_then(|panic| panic.msg()) {
+                    Err(WorkerJoinError::with_msg(format!("join worker failed: {msg}")))
+                }
+                else {
+                    Err(WorkerJoinError::with_msg("join worker failed"))
+                }
+            }
         }
     }
 
@@ -155,7 +165,15 @@ impl<S> WorkerHandle<S> {
         match self.join_handle.await {
             Ok(Ok(state)) => Ok(state),
             Ok(Err(e)) => Err(e),
-            Err(e) => Err(e.into())
+            Err(e) => {
+                let panic = e.try_into_panic().ok().map(PanicPayload::new);
+                if let Some(msg) = panic.as_ref().and_then(|panic| panic.msg()) {
+                    Err(WorkerJoinError::with_msg(format!("join worker failed: {msg}")))
+                }
+                else {
+                    Err(WorkerJoinError::with_msg("join worker failed"))
+                }
+            }
         }
     }
 
@@ -168,7 +186,7 @@ impl<S> WorkerHandle<S> {
     pub fn has_panicked(&self) -> bool {
         if self.worker_handle.is_finished() {
             let f = self.worker_state.flags();
-            !f.is_aborted() && !f.is_cancelled()
+            !f.has_abort_started() && !f.has_cancel_started()
         }
         else {
             false
@@ -220,7 +238,7 @@ impl<S> WorkerTaskSender<S> {
 
         if locked_ctx.worker_handle.is_finished() {
             let f = self.worker_state.flags();
-            let is_prev_task_panic = !f.is_aborted() && !f.is_cancelled();
+            let is_prev_task_panic = !f.has_abort_started() && !f.has_cancel_started();
             Some(is_prev_task_panic)
         }
         else {
@@ -244,7 +262,7 @@ impl<S: Send + 'static> WorkerTaskSender<S> {
             Ok(_) => Ok(Arc::clone(&self.worker_state)),
             Err(_) => {
                 let worker_flags = self.worker_state.flags();
-                if worker_flags.is_aborted() || worker_flags.is_cancelled() {
+                if worker_flags.has_abort_started() || worker_flags.has_cancel_started() {
                     Err(WorkerTaskSenderSendError::Unavailable)
                 }
                 else {
@@ -262,15 +280,17 @@ pub struct WorkerState {
 }
 
 impl WorkerState {
-
-    pub fn flags(&self) -> WorkerFlagsSnapshot {
-        WorkerFlagsSnapshot { flags: self.get_flags() }
-    }
     
     /// タスクがパニックしてワーカーが終了し、かつそのパニックのメッセージがあればそれを取得する。
     /// これが None でもタスクがパニックしてワーカーが終了していることがあることに注意。
     pub fn task_panic_msg(&self) -> Option<Arc<String>> {
         self.task_panic_msg.get().and_then(|s| s.as_ref().map(Arc::clone))
+    }
+
+    pub fn flags(&self) -> WorkerFlagsSnapshot {
+        WorkerFlagsSnapshot {
+            flags: self.get_flags(),
+        }
     }
 }
 
@@ -279,16 +299,20 @@ impl WorkerState {
     fn new() -> Self {
         Self {
             flags: AtomicU8::new(0),
-            task_panic_msg: OnceLock::new()
+            task_panic_msg: OnceLock::new(),
         }
     }
 
-    fn set_aborted(&self) {
-        self.set_flag(Self::FLAG_ABORTED);
+    fn set_abort_started(&self) {
+        self.set_flag(Self::FLAG_ABORT_STARTED);
     }
 
-    fn set_cancelled(&self) {
-        self.set_flag(Self::FLAG_CANCELLED);
+    fn set_cancel_started(&self) {
+        self.set_flag(Self::FLAG_CANCEL_STARTED);
+    }
+
+    fn set_finalize_started(&self) {
+        self.set_flag(Self::FLAG_FINALIZE_STARTED);
     }
 
     /// 既にセットされている場合はセットせず与えられた値をそのまま返す
@@ -301,8 +325,9 @@ impl WorkerState {
     }
 
 
-    const FLAG_ABORTED: u8 = 0b0000_0001;
-    const FLAG_CANCELLED: u8 = 0b0000_0010;
+    const FLAG_ABORT_STARTED: u8 = 0b0000_0001;
+    const FLAG_CANCEL_STARTED: u8 = 0b0000_0010;
+    const FLAG_FINALIZE_STARTED: u8 = 0b0000_0100;
 
     fn set_flag(&self, flag: u8) {
         self.flags.fetch_or(flag, Ordering::Release);
@@ -314,17 +339,21 @@ impl WorkerState {
 }
 
 pub struct WorkerFlagsSnapshot {
-    flags: u8
+    flags: u8,
 }
 
 impl WorkerFlagsSnapshot {
     
-    pub fn is_aborted(&self) -> bool {
-        self.flags & WorkerState::FLAG_ABORTED != 0
+    pub fn has_abort_started(&self) -> bool {
+        self.flags & WorkerState::FLAG_ABORT_STARTED != 0
     }
 
-    pub fn is_cancelled(&self) -> bool {
-        self.flags & WorkerState::FLAG_CANCELLED != 0
+    pub fn has_cancel_started(&self) -> bool {
+        self.flags & WorkerState::FLAG_CANCEL_STARTED != 0
+    }
+
+    pub fn has_finalize_started(&self) -> bool {
+        self.flags & WorkerState::FLAG_FINALIZE_STARTED != 0
     }
 }
 
@@ -348,22 +377,6 @@ impl WorkerJoinError {
 
     pub fn panic_msg(&self) -> Option<&str> {
         self.panic_msg.as_deref()
-    }
-}
-
-impl From<JoinError> for WorkerJoinError {
-
-    fn from(value: JoinError) -> WorkerJoinError {
-        let mut panic_msg = None;
-        if let Some(panic) = value.try_into_panic().ok() {
-            let panic = PanicPayload::new(panic);
-            panic_msg = panic.msg().map(|s| s.to_string());
-        }
-
-        match panic_msg {
-            Some(panic_msg) => WorkerJoinError::with_msg(panic_msg),
-            None => WorkerJoinError::with_no_msg(),
-        }
     }
 }
 

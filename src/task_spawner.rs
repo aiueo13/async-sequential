@@ -81,10 +81,10 @@ impl<S: Send + 'static> TaskSpawner<S> {
         T: for<'a> FnOnce(&'a mut S) -> Pin<Box<dyn Future<Output = R> + Send + 'a>> + Send + 'static,
         R: Send + 'static,
     {
-        let (task, task_result, task_controller) = internal::build_async_task(task);
+        let (task, task_result, task_canceller) = internal::build_async_task(task);
         match self.sender.send(task) {
             Ok(worker_state) => {
-                TaskHandle::new(task_result, task_controller, worker_state)
+                TaskHandle::new(task_result, task_canceller, worker_state)
             },
             Err(internal::WorkerTaskSenderSendError::PrevTaskPanic { panic_msg }) => {
                 TaskHandle::prev_task_panicked(panic_msg)
@@ -119,10 +119,10 @@ impl<S: Send + 'static> TaskSpawner<S> {
         T: (FnOnce(&mut S) -> R) + Send + 'static,
         R: Send + 'static,
     {
-        let (task, task_result, task_controller) = internal::build_blocking_task(task);
+        let (task, task_result, task_canceller) = internal::build_blocking_task(task);
         match self.sender.send(task) {
             Ok(worker_state) => {
-                TaskHandle::new(task_result, task_controller, worker_state)
+                TaskHandle::new(task_result, task_canceller, worker_state)
             },
             Err(internal::WorkerTaskSenderSendError::PrevTaskPanic { panic_msg }) => {
                 TaskHandle::prev_task_panicked(panic_msg)

@@ -197,7 +197,14 @@ impl<R> Future for TaskResultReceiver<R> {
         
         match Pin::new(&mut self.result_rx).poll(cx) {
             Poll::Ready(Ok(payload)) => Poll::Ready(Ok(payload)),
-            Poll::Ready(Err(_)) => Poll::Ready(Err(None)),
+            Poll::Ready(Err(_)) => {
+                if self.panic_rx_finished {
+                    Poll::Ready(Err(None))
+                }
+                else {
+                    Poll::Pending
+                }
+            },
             Poll::Pending => Poll::Pending,
         }
     }

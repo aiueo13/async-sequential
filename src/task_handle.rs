@@ -113,7 +113,7 @@ impl<R> TaskHandle<R> {
             Repr::Unspawned(_) | Repr::ScopedNoncancellableTask { .. } => false,
             Repr::CancellableTask { task_canceller, worker_state, .. } => {
                 let f = worker_state.flags();
-                if f.is_aborted() || f.is_cancelled() {
+                if f.has_finalize_started() || f.has_abort_started() || f.has_cancel_started() {
                     false
                 }
                 else {
@@ -160,7 +160,7 @@ impl<R> TaskHandle<R> {
 
                 TaskCanceller::new(Arc::new(move || {
                     let f = worker_state.flags();
-                    if f.is_aborted() || f.is_cancelled() {
+                    if f.has_finalize_started() || f.has_abort_started() || f.has_cancel_started() {
                         false
                     }
                     else {
@@ -220,10 +220,10 @@ impl<R> Future for TaskHandle<R> {
                                 }
 
                                 let worker_flags = worker_state.flags();
-                                if worker_flags.is_cancelled() {
+                                if worker_flags.has_cancel_started() {
                                     Poll::Ready(Err(TaskError::worker_cancelled()))
                                 }
-                                else if worker_flags.is_aborted() {
+                                else if worker_flags.has_abort_started() {
                                     Poll::Ready(Err(TaskError::worker_aborted()))
                                 }
                                 else {
@@ -238,7 +238,8 @@ impl<R> Future for TaskHandle<R> {
                         // 後続のタスクはキャンセルされない。
                         // そのため、ここでタスクをキャンセルしないと、後続のタスクが
                         // 実行中のタスクの完了まで解決されなくなってしまう。
-                        if worker_state.flags().is_cancelled() {
+                        if worker_state.flags().has_cancel_started() {
+                            // タスクをキャンセルできなければそのタスクは実行中。
                             if task_canceller.cancel() {
                                 return Poll::Ready(Err(TaskError::worker_cancelled()));
                             }

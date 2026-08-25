@@ -745,17 +745,20 @@ mod tests2 {
             let r = handle.await;
             assert!(r.as_ref().is_err_and(|e| !e.is_cancelled()));
             assert!(r.as_ref().is_err_and(|e| e.is_panic()));
+            assert!(r.as_ref().is_err_and(|e| e.is_task_panic()));
         }
         {
             let executor = Executor::new(());
         
             let handle = executor.spawn_blocking(move |_| {
-                panic!()
+                panic!("this is a panic message")
             });
 
             let r = handle.await;
+            eprintln!("{}", r.as_ref().unwrap_err());
             assert!(r.as_ref().is_err_and(|e| !e.is_cancelled()));
             assert!(r.as_ref().is_err_and(|e| e.is_panic()));
+            assert!(r.as_ref().is_err_and(|e| e.is_task_panic()));
         }
     }
 
