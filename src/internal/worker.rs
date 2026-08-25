@@ -3,10 +3,13 @@ use std::{borrow::Cow, panic, sync::{Arc, Mutex as SyncMutex, OnceLock, atomic::
 use tokio::{sync::mpsc, task::{AbortHandle, JoinHandle, spawn, spawn_blocking}};
 
 
-pub fn spawn_worker<S: Send + 'static>(mut state: S) -> WorkerHandle<S> {
+pub fn spawn_worker<S: Send + 'static>(state: S) -> WorkerHandle<S> {
     let (task_tx, mut task_rx) = mpsc::unbounded_channel::<Task<S>>();
     let worker_state = Arc::new(WorkerState::new());
     let (panic_sender_tx, panic_sender_rx) = slot();
+
+    // state がスタックに大きいデータを保持している場合の移動コストを削減するため、ヒープに置く
+    let mut state = Box::new(state);
 
     let (worker_handle, worker_join_handle) = {
         let worker_state = Arc::clone(&worker_state);
@@ -25,11 +28,11 @@ pub fn spawn_worker<S: Send + 'static>(mut state: S) -> WorkerHandle<S> {
                 match task {
                     RawTask::Blocking(task) => {
                         state = spawn_blocking(move || {
-                            task(&mut state);
+                            task(&mut *state);
                             state
                         }).await.unwrap_or_else(|e| panic::resume_unwind(e.into_panic()));
                     },
-                    RawTask::Async(task) => task(&mut state).await,
+                    RawTask::Async(task) => task(&mut *state).await,
                 }
             }
             state
@@ -85,7 +88,7 @@ pub fn spawn_worker<S: Send + 'static>(mut state: S) -> WorkerHandle<S> {
 
 pub struct WorkerHandle<S> {
     worker_handle: AbortHandle,
-    join_handle: JoinHandle<Result<S, WorkerJoinError>>,
+    join_handle: JoinHandle<Result<Box<S>, WorkerJoinError>>,
     worker_state: Arc<WorkerState>,
     task_tx: mpsc::UnboundedSender<Task<S>>,
     shared_task_senders_ctx: Arc<SyncMutex<Option<WorkerTaskSenderCtx<S>>>>,
@@ -95,7 +98,7 @@ impl<S> WorkerHandle<S> {
 
     fn new(
         worker_handle: AbortHandle,
-        join_handle: JoinHandle<Result<S, WorkerJoinError>>,
+        join_handle: JoinHandle<Result<Box<S>, WorkerJoinError>>,
         worker_state: Arc<WorkerState>,
         task_tx: mpsc::UnboundedSender<Task<S>>,
     ) -> Self {
@@ -142,7 +145,7 @@ impl<S> WorkerHandle<S> {
         drop(self.task_tx);
 
         match self.join_handle.await {
-            Ok(Ok(state)) => Ok(state),
+            Ok(Ok(state)) => Ok(*state),
             Ok(Err(e)) => Err(e),
             Err(e) => {
                 let panic = e.try_into_panic().ok().map(PanicPayload::new);
@@ -163,7 +166,7 @@ impl<S> WorkerHandle<S> {
         drop(self.task_tx);
 
         match self.join_handle.await {
-            Ok(Ok(state)) => Ok(state),
+            Ok(Ok(state)) => Ok(*state),
             Ok(Err(e)) => Err(e),
             Err(e) => {
                 let panic = e.try_into_panic().ok().map(PanicPayload::new);

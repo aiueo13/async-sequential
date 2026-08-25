@@ -4,15 +4,9 @@ use std::pin::Pin;
 
 /// A handle for spawning tasks onto a [JoinQueue].
 ///
-/// It can be obtained from [JoinQueue::spawner].
+/// This TaskSpawner can be obtained from [JoinQueue::spawner()](JoinQueue::spawner).
 /// 
-/// It provides methods equivalent to [JoinQueue::spawn()](JoinQueue::spawn) and [JoinQueue::spawn_blocking()](JoinQueue::spawn_blocking),
-/// except that the returned [TaskHandle] immediately returns an error
-/// if this TaskSpawner can no longer spawn tasks,
-/// such as when the TaskSpawner has been closed
-/// or the associated JoinQueue has been aborted or cancelled.
-/// 
-/// Note that [JoinQueue::join()](JoinQueue::join) and [JoinQueue::try_join()](JoinQueue::try_join) does not complete as long as any TaskSpawner remains alive.
+/// Note that [JoinQueue::join()](JoinQueue::join) and [JoinQueue::try_join()](JoinQueue::try_join) do not complete as long as any TaskSpawner remains alive.
 /// To allow it to complete, either drop all TaskSpawners
 /// or call [JoinQueue::close_spawners()](JoinQueue::close_spawners) beforehand.
 pub struct TaskSpawner<S> {
@@ -30,11 +24,19 @@ impl<S> TaskSpawner<S> {
 
     /// Returns true if this TaskSpawner can no longer spawn tasks.
     ///
-    /// It occurs when the TaskSpawner has been closed
+    /// This occurs when the TaskSpawner has been closed
     /// or the associated [JoinQueue] has been aborted or cancelled.
     /// From this point onward,
-    /// [TaskHandle]s obtained from [spawn()](Self::spawn) or [spawn_blocking()](Self::spawn_blocking)
-    /// immediately return errors for which [TaskError::kind()](TaskError::kind) returns [TaskErrorKind::TaskSpawnerUnavailable].
+    /// [spawn()] or [spawn_blocking()] returns a [TaskHandle]
+    /// that immediately resolves to an error
+    /// for which [TaskError::kind()] is [TaskErrorKind::TaskSpawnerUnavailable].
+    /// 
+    /// [spawn()]: Self::spawn
+    /// [spawn_blocking()]: Self::spawn_blocking
+    /// [JoinQueue]: crate::JoinQueue
+    /// [TaskHandle]: crate::TaskHandle
+    /// [TaskError::kind()]: crate::TaskError::kind
+    /// [TaskErrorKind::TaskSpawnerUnavailable]: crate::TaskErrorKind::TaskSpawnerUnavailable
     pub fn is_unavailable(&self) -> bool {
         self.sender.is_unavailable()
     }
@@ -42,17 +44,26 @@ impl<S> TaskSpawner<S> {
     /// Returns true if a task previously executed by the associated [JoinQueue] has panicked.
     /// 
     /// Once a task has panicked, while this TaskSpawner is not unavailable,
-    /// [TaskHandle]s obtained from [spawn()](Self::spawn) or [spawn_blocking()](Self::spawn_blocking)
-    /// immediately return errors
-    /// for which [TaskError::kind()](TaskError::kind) returns [TaskErrorKind::PreviousTaskPanic].
-    /// Because the state invariants may have been violated by the task's panic.
+    /// [spawn()] or [spawn_blocking()] returns a [TaskHandle]
+    /// that immediately resolves to an error
+    /// for which [TaskError::kind()] is [TaskErrorKind::PreviousTaskPanic].
+    /// This is because the state invariants may have been violated by the task's panic.
     /// 
     /// Returns None if the TaskSpawner is unavailable.
-    /// It occurs when the TaskSpawner has been closed
-    /// or the JoinQueue has been aborted or cancelled.
-    /// From this point onward, 
-    /// TaskHandles obtained from spawn() or spawn_blocking()
-    /// immediately return errors for which TaskError::kind() returns [TaskErrorKind::TaskSpawnerUnavailable].
+    /// This occurs when the TaskSpawner has been closed
+    /// or the associated [JoinQueue] has been aborted or cancelled.
+    /// From this point onward,
+    /// spawn() or spawn_blocking() returns a TaskHandle
+    /// that immediately resolves to an error
+    /// for which TaskError::kind() is [TaskErrorKind::TaskSpawnerUnavailable].
+    /// 
+    /// [spawn()]: Self::spawn
+    /// [spawn_blocking()]: Self::spawn_blocking
+    /// [JoinQueue]: crate::JoinQueue
+    /// [TaskHandle]: crate::TaskHandle
+    /// [TaskError::kind()]: crate::TaskError::kind
+    /// [TaskErrorKind::TaskSpawnerUnavailable]: crate::TaskErrorKind::TaskSpawnerUnavailable
+    /// [TaskErrorKind::PreviousTaskPanic]: crate::TaskErrorKind::PreviousTaskPanic
     pub fn has_panicked(&self) -> Option<bool> {
         self.sender.has_panicked()
     }
@@ -68,8 +79,8 @@ impl<S: Send + 'static> TaskSpawner<S> {
     /// regardless of whether they are asynchronous or blocking.
     ///
     /// This method is equivalent to [JoinQueue::spawn()](JoinQueue::spawn),
-    /// except that the returned TaskHandle immediately returns an error
-    /// if this TaskSpawner can no longer spawn tasks,
+    /// except that if this method is called after this TaskSpawner can no longer spawn tasks,
+    /// it returns a TaskHandle that immediately resolves to an error,
     /// such as when the TaskSpawner has been closed
     /// or the associated [JoinQueue] has been aborted or cancelled.
     /// 
@@ -105,8 +116,8 @@ impl<S: Send + 'static> TaskSpawner<S> {
     /// to avoid blocking the asynchronous runtime.
     /// 
     /// This method is equivalent to [JoinQueue::spawn_blocking()](JoinQueue::spawn_blocking),
-    /// except that the returned TaskHandle immediately returns an error
-    /// if this TaskSpawner can no longer spawn tasks,
+    /// except that if this method is called after this TaskSpawner can no longer spawn tasks,
+    /// it returns a TaskHandle that immediately resolves to an error,
     /// such as when the TaskSpawner has been closed
     /// or the associated [JoinQueue] has been aborted or cancelled.
     /// 

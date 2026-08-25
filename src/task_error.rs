@@ -115,7 +115,7 @@ impl TaskError {
     /// Returns true if the error was caused by the task being cancelled,
     /// either explicitly or implicitly.
     ///
-    /// It occurs when [kind()](Self::kind) returns any of the following.
+    /// This occurs when [kind()](Self::kind) returns any of the following.
     /// - [TaskErrorKind::QueueAborted]
     /// - [TaskErrorKind::QueueCancelled]
     /// - [TaskErrorKind::TaskSpawnerUnavailable]
@@ -130,7 +130,7 @@ impl TaskError {
 
     /// Returns true if the error was caused by the task or any previous task panicking.
     ///
-    /// It occurs when [kind()](Self::kind) returns any of the following.
+    /// This occurs when [kind()](Self::kind) returns any of the following.
     /// - [TaskErrorKind::TaskPanic]
     /// - [TaskErrorKind::PreviousTaskPanic]
     pub fn is_panic(&self) -> bool {
@@ -347,7 +347,7 @@ impl TaskErrorKind {
 
     /// Returns true if the error was caused by the [JoinQueue](crate::JoinQueue) being cancelled.
     ///
-    /// It occurs when the task is cancelled as a result of [JoinQueue::cancel()](crate::JoinQueue::cancel) being called.
+    /// This occurs when the task is cancelled as a result of [JoinQueue::cancel()](crate::JoinQueue::cancel) being called.
     ///
     /// # Examples
     /// ```
@@ -380,7 +380,7 @@ impl TaskErrorKind {
     /// Returns true if the error was caused by the task being spawned
     /// after the [TaskSpawner](crate::TaskSpawner) could no longer spawn tasks.
     ///
-    /// It occurs when the task is cancelled before the task is spawned by the TaskSpawner as a result of any of the following:
+    /// This occurs when the task is cancelled before the task is spawned by the TaskSpawner as a result of any of the following:
     /// - [JoinQueue](crate::JoinQueue) being aborted before spawning tasks.
     /// - JoinQueue being cancelled before spawning tasks.
     /// - TaskSpawner being closed before spawning tasks.
@@ -424,7 +424,7 @@ impl TaskErrorKind {
 
     /// Returns true if the error was caused by the task being cancelled through its handle.
     ///
-    /// It occurs when the task is cancelled as a result of any of the following methods being called.
+    /// This occurs when the task is cancelled as a result of any of the following methods being called.
     /// - [TaskHandle::cancel()](crate::TaskHandle::cancel)
     /// - [TaskCanceller::cancel()](crate::TaskCanceller::cancel)
     ///

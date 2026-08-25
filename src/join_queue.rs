@@ -202,10 +202,19 @@ impl<S> JoinQueue<S> {
     /// Returns true if a task previously executed by this JoinQueue has panicked.
     /// 
     /// Once a task has panicked,
-    /// [TaskHandle]s obtained from [spawn()](Self::spawn) or [spawn_blocking()](Self::spawn_blocking)
-    /// immediately return errors for which [TaskError::kind()](TaskError::kind) returns [TaskErrorKind::PreviousTaskPanic]
-    /// and [execute()](Self::execute) or [execute_blocking()](Self::execute_blocking) panic as well.
-    /// Because the state invariants may have been violated by the task's panic.
+    /// [spawn()] or [spawn_blocking()] returns a [TaskHandle]
+    /// that immediately resolves to an error
+    /// for which [TaskError::kind()] is [TaskErrorKind::PreviousTaskPanic],
+    /// while [execute()] and [execute_blocking()] also panic.
+    /// This is because the state invariants may have been violated by the task's panic.
+    /// 
+    /// [spawn()]: Self::spawn
+    /// [spawn_blocking()]: Self::spawn_blocking
+    /// [TaskHandle]: crate::TaskHandle
+    /// [TaskError::kind()]: crate::TaskError::kind
+    /// [TaskErrorKind::PreviousTaskPanic]: crate::TaskErrorKind::PreviousTaskPanic
+    /// [execute()]: Self::execute
+    /// [execute_blocking()]: Self::execute_blocking
     pub fn has_panicked(&self) -> bool {
         let worker = self.worker.lock().unwrap();
         match &*worker {
@@ -233,14 +242,8 @@ impl<S> JoinQueue<S> {
 impl<S: Send + 'static> JoinQueue<S> {
 
     /// Returns a [TaskSpawner] for queuing tasks onto this JoinQueue.
-    ///
-    /// TaskSpawner provides methods equivalent to [spawn()](JoinQueue::spawn) and [spawn_blocking()](JoinQueue::spawn_blocking),
-    /// except that the returned [TaskHandle] immediately returns an error
-    /// if the TaskSpawner can no longer spawn tasks,
-    /// such as when the TaskSpawner has been closed
-    /// or the JoinQueue has been aborted or cancelled.
     /// 
-    /// Note that [join()](JoinQueue::join) and [try_join()](JoinQueue::try_join) does not complete as long as any TaskSpawner remains alive.
+    /// Note that [join()](JoinQueue::join) and [try_join()](JoinQueue::try_join) do not complete as long as any TaskSpawner remains alive.
     /// To allow it to complete, either drop all TaskSpawners
     /// or call [close_spawners()](JoinQueue::close_spawners) beforehand.
     /// 
