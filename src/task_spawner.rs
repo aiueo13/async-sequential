@@ -51,7 +51,7 @@ impl<S> TaskSpawner<S> {
     /// It occurs when the TaskSpawner has been closed
     /// or the JoinQueue has been aborted or cancelled.
     /// From this point onward, 
-    /// TaskHandles obtained from spawn or spawn_blocking
+    /// TaskHandles obtained from spawn() or spawn_blocking()
     /// immediately return errors for which TaskError::kind() returns [TaskErrorKind::TaskSpawnerUnavailable].
     pub fn has_panicked(&self) -> Option<bool> {
         self.sender.has_panicked()
