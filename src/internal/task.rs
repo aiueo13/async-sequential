@@ -168,7 +168,8 @@ impl TaskPanicSender {
 pub struct TaskResultReceiver<R> {
     result_rx: oneshot::Receiver<R>,
     panic_rx: oneshot::Receiver<PanicPayload>,
-    panic_rx_finished: bool
+    result_rx_ready: bool,
+    panic_rx_ready: bool
 }
 
 impl<R> TaskResultReceiver<R> {
@@ -178,7 +179,12 @@ impl<R> TaskResultReceiver<R> {
         panic_rx: oneshot::Receiver<PanicPayload>,
     ) -> Self {
 
-        Self { result_rx, panic_rx, panic_rx_finished: false }
+        Self {
+            result_rx, 
+            panic_rx, 
+            result_rx_ready: false,
+            panic_rx_ready: false,
+        }
     }
 }
 
@@ -186,26 +192,34 @@ impl<R> Future for TaskResultReceiver<R> {
     type Output = Result<R, Option<PanicPayload>>;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> std::task::Poll<Self::Output> {
-        if !self.panic_rx_finished {
+        if !self.panic_rx_ready {
             if let Poll::Ready(poll) = Pin::new(&mut self.panic_rx).poll(cx) {
-                self.panic_rx_finished = true;
+                self.panic_rx_ready = true;
                 if let Ok(panic) = poll {
                     return Poll::Ready(Err(Some(panic)));
                 }
+                else {
+                    // panic tx が送信されずに drop された場合
+                }
             }
         }
-        
-        match Pin::new(&mut self.result_rx).poll(cx) {
-            Poll::Ready(Ok(payload)) => Poll::Ready(Ok(payload)),
-            Poll::Ready(Err(_)) => {
-                if self.panic_rx_finished {
-                    Poll::Ready(Err(None))
+        if !self.result_rx_ready {
+            if let Poll::Ready(poll) = Pin::new(&mut self.result_rx).poll(cx) {
+                self.result_rx_ready = true;
+                if let Ok(result) = poll {
+                    return Poll::Ready(Ok(result));
                 }
                 else {
-                    Poll::Pending
+                    // result tx が送信されずに drop された場合
                 }
-            },
-            Poll::Pending => Poll::Pending,
+            }
+        }
+
+        if self.panic_rx_ready && self.result_rx_ready {
+            Poll::Ready(Err(None))
+        }
+        else {
+            Poll::Pending
         }
     }
 }
