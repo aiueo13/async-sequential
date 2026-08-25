@@ -11,9 +11,9 @@ readme = "README.md"
 
 [dependencies]
 tokio = { version = "1", features = [
-    # For `tokio::task::spawn` and `tokio::task::spawn_blocking`
+    # To use `tokio::task`
     "rt",
-    # For `tokio::sync::oneshot`
+    # To use `tokio::sync`
     "sync"
 ] }
 
