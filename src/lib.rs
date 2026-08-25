@@ -548,6 +548,23 @@ mod tests3 {
         assert!(h.await.unwrap_err().is_task_panic());
         executor.execute_blocking(|_| {}).await;
     }
+
+    #[tokio::test]
+    async fn test_executer_panicked() {
+        let executor = Executor::new(());
+        let h = executor.spawn_blocking(|_| { panic!() }); 
+        let r = h.await;
+        assert!(executor.has_panicked());
+        assert!(r.unwrap_err().is_task_panic());
+
+        let executor = Executor::new(());
+        let s = executor.spawner();
+        let h = s.spawn_blocking(|_| { panic!() }); 
+        let r = h.await;
+        assert!(s.has_panicked().unwrap());
+        assert!(executor.has_panicked());
+        assert!(r.unwrap_err().is_task_panic());
+    }
 }
 
 #[cfg(test)]
