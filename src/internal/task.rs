@@ -1,4 +1,4 @@
-use crate::*;
+use super::*;
 use std::panic::{RefUnwindSafe, UnwindSafe};
 use std::pin::Pin;
 use std::future::Future;
@@ -10,52 +10,120 @@ use tokio::sync::oneshot;
 
 pub fn build_async_task<S, T, R>(
     task: T,
-) -> (Task<S>, TaskResultReceiver<R>, TaskController)
+) -> (Task<S>, TaskResultReceiver<R>, TaskCanceller)
 where 
     S: Send + 'static,
     T: for<'a> FnOnce(&'a mut S) -> Pin<Box<dyn Future<Output = R> + Send + 'a>> + Send + 'static,
     R: Send + 'static,
 {
-    let (result_tx, result_rx) = oneshot::channel();
-    let task = RawTask::Async(Box::new(|s: &mut S| Box::pin(async {
-        let _ = result_tx.send(task(s).await);
-    })));
-    build_task(task, result_rx)
+    let (task, result_rx) = build_async_raw_task(task);
+    build_cancellable_task(task, result_rx)
 }
 
 pub fn build_blocking_task<S, T, R>(
     task: T,
-) -> (Task<S>, TaskResultReceiver<R>, TaskController)
+) -> (Task<S>, TaskResultReceiver<R>, TaskCanceller)
 where 
     S: Send + 'static,
     T: (FnOnce(&mut S) -> R) + Send + 'static,
     R: Send + 'static,
 {
+    let (task, result_rx) = build_blocking_raw_task(task);
+    build_cancellable_task(task, result_rx)
+}
+
+pub fn build_uncancellable_async_task<S, T, R>(
+    task: T,
+) -> (Task<S>, TaskResultReceiver<R>)
+where 
+    S: Send + 'static,
+    T: for<'a> FnOnce(&'a mut S) -> Pin<Box<dyn Future<Output = R> + Send + 'a>> + Send + 'static,
+    R: Send + 'static,
+{
+    let (task, result_rx) = build_async_raw_task(task);
+    build_uncancellable_task(task, result_rx)
+}
+
+pub fn build_uncancellable_blocking_task<S, T, R>(
+    task: T,
+) -> (Task<S>, TaskResultReceiver<R>)
+where 
+    S: Send + 'static,
+    T: (FnOnce(&mut S) -> R) + Send + 'static,
+    R: Send + 'static,
+{
+    let (task, result_rx) = build_blocking_raw_task(task);
+    build_uncancellable_task(task, result_rx)
+}
+
+
+fn build_async_raw_task<S, T, R>(
+    task: T,
+) -> (RawTask<S>, oneshot::Receiver<R>)
+where 
+    S: Send + 'static,
+    T: for<'a> FnOnce(&'a mut S) -> Pin<Box<dyn Future<Output = R> + Send + 'a>> + Send + 'static,
+    R: Send + 'static
+{
+    let (result_tx, result_rx) = oneshot::channel();
+    let task = RawTask::Async(Box::new(|s: &mut S| Box::pin(async {
+        let _ = result_tx.send(task(s).await);
+    })));
+    (task, result_rx)
+}
+
+fn build_blocking_raw_task<S, T, R>(
+    task: T,
+) -> (RawTask<S>, oneshot::Receiver<R>)
+where 
+    S: Send + 'static,
+    T: (FnOnce(&mut S) -> R) + Send + 'static,
+    R: Send + 'static
+{
     let (result_tx, result_rx) = oneshot::channel();
     let task = RawTask::Blocking(Box::new(move |s: &mut S| {
         let _ = result_tx.send(task(s));
     }));
-    build_task(task, result_rx)
+    (task, result_rx)
 }
 
-fn build_task<S, R>(
+fn build_cancellable_task<S, R>(
     task: RawTask<S>,
     result_rx: oneshot::Receiver<R>,
-) -> (Task<S>, TaskResultReceiver<R>, TaskController)
+) -> (Task<S>, TaskResultReceiver<R>, TaskCanceller)
 where 
     S: Send + 'static,
 {
     let (panic_tx, panic_rx) = oneshot::channel();
     let panic_sender = TaskPanicSender::new(panic_tx);
     let task = Arc::new(OnceTake::new((task, panic_sender)));
-    let controller = TaskController::new(Arc::downgrade(&task));
+    let canceller = TaskCanceller::new(Arc::downgrade(&task));
     let result = TaskResultReceiver::new(result_rx, panic_rx);
-    (Task { task }, result, controller)
+    (Task::new_cancellable(task), result, canceller)
+}
+
+fn build_uncancellable_task<S, R>(
+    task: RawTask<S>,
+    result_rx: oneshot::Receiver<R>,
+) -> (Task<S>, TaskResultReceiver<R>)
+where 
+    S: Send + 'static,
+{
+    let (panic_tx, panic_rx) = oneshot::channel();
+    let panic_sender = TaskPanicSender::new(panic_tx);
+    let task = (task, panic_sender);
+    let result = TaskResultReceiver::new(result_rx, panic_rx);
+    (Task::new_uncancellable(task), result)
 }
 
 
 pub struct Task<S> {
-    task: Arc<OnceTake<(RawTask<S>, TaskPanicSender)>>,
+    repr: TaskRepr<S>,
+}
+
+enum TaskRepr<S> {
+    Uncancellable((RawTask<S>, TaskPanicSender)),
+    Cancellable(Arc<OnceTake<(RawTask<S>, TaskPanicSender)>>)
 }
 
 pub enum RawTask<S> {
@@ -65,8 +133,19 @@ pub enum RawTask<S> {
 
 impl<S> Task<S> {
 
+    fn new_uncancellable(task: (RawTask<S>, TaskPanicSender)) -> Self {
+        Self { repr: TaskRepr::Uncancellable(task)}
+    }
+
+    fn new_cancellable(task: Arc<OnceTake<(RawTask<S>, TaskPanicSender)>>) -> Self {
+        Self { repr: TaskRepr::Cancellable(task)}
+    }
+
     pub fn take(self) -> Option<(RawTask<S>, TaskPanicSender)> {
-        self.task.take()
+        match self.repr {
+            TaskRepr::Uncancellable(task) => Some(task),
+            TaskRepr::Cancellable(task) => task.take(),
+        }
     }
 }
 
@@ -125,7 +204,7 @@ impl<R> Future for TaskResultReceiver<R> {
 }
 
 #[derive(Clone)]
-pub struct TaskController {
+pub struct TaskCanceller {
     repr: Arc<dyn (Fn(TaskControllerReprRequest) -> bool) + Sync + Send + RefUnwindSafe + UnwindSafe + 'static>
 }
 
@@ -134,7 +213,7 @@ enum TaskControllerReprRequest {
     IsCancelled,
 }
 
-impl TaskController {
+impl TaskCanceller {
 
     fn new<S: Send + 'static>(task: Weak<OnceTake<S>>) -> Self {
         let is_cancelled = AtomicBool::new(false);
@@ -157,7 +236,7 @@ impl TaskController {
     }
 }
 
-impl TaskController {
+impl TaskCanceller {
 
     /// すでにキャンセルされているかを返す。
     pub fn is_cancelled(&self) -> bool {

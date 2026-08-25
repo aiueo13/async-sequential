@@ -4,7 +4,7 @@ use std::{fmt, panic};
 
 /// Error that occurred while waiting for an executor to complete.
 pub struct ExecutorJoinError {
-    repr: WorkerJoinError
+    repr: internal::WorkerJoinError
 }
 
 impl ExecutorJoinError {
@@ -17,9 +17,9 @@ impl ExecutorJoinError {
     }
 }
 
-impl From<WorkerJoinError> for ExecutorJoinError {
+impl From<internal::WorkerJoinError> for ExecutorJoinError {
 
-    fn from(value: WorkerJoinError) -> Self {
+    fn from(value: internal::WorkerJoinError) -> Self {
         Self { repr: value }
     }
 }

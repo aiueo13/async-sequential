@@ -9,7 +9,7 @@ This crate requires the `tokio` async runtime.
 # Usage
 
 ```rust
-use std::time::Duration;
+use std::{thread, time::Duration};
 use tokio::time::sleep;
 
 #[tokio::main]
@@ -24,10 +24,12 @@ async fn main() {
     let spawner = executor.spawner();
     tokio::spawn(async move {
         let task_handle1 = spawner.spawn_blocking(move |state| {
+            thread::sleep(Duration::from_secs(2));
             state.push(2);
             "hello"
         });
         let task_handle2 = spawner.spawn(move |state| Box::pin(async move {
+            sleep(Duration::from_secs(1)).await;
             state.push(3);
             "world"
         }));

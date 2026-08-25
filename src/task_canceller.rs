@@ -19,8 +19,8 @@ pub struct TaskCanceller {
 
 #[derive(Clone)]
 enum Repr {
-    Inactive,
-    Active {
+    Noncancellable,
+    Cancellable {
         cancel: Arc<dyn (Fn() -> bool) + Sync + Send + RefUnwindSafe + UnwindSafe + 'static>
     }
 }
@@ -28,11 +28,11 @@ enum Repr {
 impl TaskCanceller {
 
     pub(crate) fn new(cancel: Arc<dyn (Fn() -> bool) + Sync + Send + RefUnwindSafe + UnwindSafe + 'static>) -> Self {
-        Self { repr: Repr::Active { cancel } }
+        Self { repr: Repr::Cancellable { cancel } }
     }
 
-    pub(crate) fn inactive() -> Self {
-        Self { repr: Repr::Inactive }
+    pub(crate) fn noncancellable() -> Self {
+        Self { repr: Repr::Noncancellable }
     }
 }
 
@@ -48,8 +48,8 @@ impl TaskCanceller {
     /// This method is equivalent to [TaskHandle::cancel](crate::TaskHandle::cancel).
     pub fn cancel(&self) -> bool {
         match &self.repr {
-            Repr::Inactive => false,
-            Repr::Active { cancel } => (cancel)(),
+            Repr::Noncancellable => false,
+            Repr::Cancellable { cancel } => (cancel)(),
         }
     }
 }

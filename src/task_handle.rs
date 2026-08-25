@@ -11,34 +11,52 @@ pub struct TaskHandle<R> {
 }
 
 enum Repr<R> {
+    CancellableTask {
+        task_result: internal::TaskResultReceiver<R>,
+        task_canceller: internal::TaskCanceller,
+        worker_state: Arc<internal::WorkerState>,
+    },
+    ScopedNoncancellableTask {
+        task_result: internal::TaskResultReceiver<R>,
+        worker_state: Arc<internal::WorkerState>,
+    },
+    Unspawned(UnspawnedReason)
+}
+
+enum UnspawnedReason {
     WorkerTaskSenderUnavailable,
     PrevTaskPanic {
         panic_msg: Option<Arc<String>>
     },
-    Active {
-        task_result: TaskResultReceiver<R>,
-        task_controller: TaskController,
-        worker_state: Arc<WorkerState>,
-    }
 }
 
 impl<R> TaskHandle<R> {
 
     pub(crate) fn worker_task_sender_unavailable() -> Self {
-        Self { repr: Repr::WorkerTaskSenderUnavailable }
+        Self { repr: Repr::Unspawned(UnspawnedReason::WorkerTaskSenderUnavailable) }
     }
 
-    pub(crate) fn prev_task_already_panicked(panic_msg: Option<Arc<String>>) -> Self {
-        Self { repr: Repr::PrevTaskPanic { panic_msg } }
+    pub(crate) fn prev_task_panicked(panic_msg: Option<Arc<String>>) -> Self {
+        Self { repr: Repr::Unspawned(UnspawnedReason::PrevTaskPanic { panic_msg }) }
     }
 
     pub(crate) fn new(
-        task_result: TaskResultReceiver<R>,
-        task_controller: TaskController,
-        worker_state: Arc<WorkerState>,
+        task_result: internal::TaskResultReceiver<R>,
+        task_canceller: internal::TaskCanceller,
+        worker_state: Arc<internal::WorkerState>,
     ) -> Self {
 
-        Self { repr: Repr::Active { task_result, task_controller, worker_state } }
+        Self { repr: Repr::CancellableTask { task_result, task_canceller, worker_state } }
+    }
+
+    /// タスクが終了するまで Worker が abort も cancel も行われず、
+    /// また他のタスクのパニック以外でタスク自体もキャンセルされないタスクを作成する。
+    pub(crate) fn new_scoped_noncancellable(
+        task_result: internal::TaskResultReceiver<R>,
+        worker_state: Arc<internal::WorkerState>,
+    ) -> Self {
+
+        Self { repr: Repr::ScopedNoncancellableTask { task_result, worker_state } }
     }
 }
 
@@ -92,15 +110,14 @@ impl<R> TaskHandle<R> {
     /// ```
     pub fn cancel(&self) -> bool {
         match &self.repr {
-            Repr::WorkerTaskSenderUnavailable |
-            Repr::PrevTaskPanic { .. } => false,
-            Repr::Active { task_controller, worker_state, .. } => {
+            Repr::Unspawned(_) | Repr::ScopedNoncancellableTask { .. } => false,
+            Repr::CancellableTask { task_canceller, worker_state, .. } => {
                 let f = worker_state.flags();
                 if f.is_aborted() || f.is_cancelled() {
                     false
                 }
                 else {
-                    task_controller.cancel()
+                    task_canceller.cancel()
                 }
             },
         }
@@ -134,10 +151,11 @@ impl<R> TaskHandle<R> {
     /// ```
     pub fn canceller(&self) -> TaskCanceller {
         match &self.repr {
-            Repr::WorkerTaskSenderUnavailable |
-            Repr::PrevTaskPanic { .. } => TaskCanceller::inactive(),
-            Repr::Active { task_controller, worker_state, .. } => {
-                let task_controller = task_controller.clone();
+            Repr::Unspawned(_) | Repr::ScopedNoncancellableTask { .. } => {
+                TaskCanceller::noncancellable()
+            },
+            Repr::CancellableTask { task_canceller, worker_state, .. } => {
+                let task_canceller = task_canceller.clone();
                 let worker_state = Arc::clone(worker_state);
 
                 TaskCanceller::new(Arc::new(move || {
@@ -146,7 +164,7 @@ impl<R> TaskHandle<R> {
                         false
                     }
                     else {
-                        task_controller.cancel()
+                        task_canceller.cancel()
                     }
                 }))
             },
@@ -163,20 +181,41 @@ impl<R> Future for TaskHandle<R> {
     ) -> Poll<Self::Output> {
 
         match &mut self.repr {
-            Repr::WorkerTaskSenderUnavailable => {
-                Poll::Ready(Err(TaskError::worker_task_sender_unavailable()))
+            Repr::Unspawned(inactive) => {
+                match inactive {
+                    UnspawnedReason::WorkerTaskSenderUnavailable => {
+                        Poll::Ready(Err(TaskError::worker_task_sender_unavailable()))
+                    },
+                    UnspawnedReason::PrevTaskPanic { panic_msg } => {
+                        Poll::Ready(Err(TaskError::prev_task_panicked(panic_msg.take())))
+                    }
+                }
             },
-            Repr::PrevTaskPanic { panic_msg } => {
-                Poll::Ready(Err(TaskError::prev_task_panicked(panic_msg.take())))
-            },
-            Repr::Active { task_result, task_controller, worker_state } => {
+            // このタスクが実行中は Worker が abort も cancel もされず、
+            // タスクのキャンセルも行われることはない。
+            Repr::ScopedNoncancellableTask { task_result, worker_state } => {
                 match Pin::new(task_result).poll(cx) {
                     Poll::Ready(result) => {
                         match result {
                             Ok(value) => Poll::Ready(Ok(value)),
                             Err(Some(panic)) => Poll::Ready(Err(TaskError::task_panicked(panic))),
                             Err(None) => {
-                                if task_controller.is_cancelled() {
+                                let panic_msg = worker_state.task_panic_msg();
+                                Poll::Ready(Err(TaskError::prev_task_panicked(panic_msg)))
+                            },
+                        }
+                    },
+                    Poll::Pending => Poll::Pending
+                }
+            },
+            Repr::CancellableTask { task_result, task_canceller, worker_state } => {
+                match Pin::new(task_result).poll(cx) {
+                    Poll::Ready(result) => {
+                        match result {
+                            Ok(value) => Poll::Ready(Ok(value)),
+                            Err(Some(panic)) => Poll::Ready(Err(TaskError::task_panicked(panic))),
+                            Err(None) => {
+                                if task_canceller.is_cancelled() {
                                     return Poll::Ready(Err(TaskError::task_cancelled()))
                                 }
 
@@ -200,7 +239,7 @@ impl<R> Future for TaskHandle<R> {
                         // そのため、ここでタスクをキャンセルしないと、後続のタスクが
                         // 実行中のタスクの完了まで解決されなくなってしまう。
                         if worker_state.flags().is_cancelled() {
-                            if task_controller.cancel() {
+                            if task_canceller.cancel() {
                                 return Poll::Ready(Err(TaskError::worker_cancelled()));
                             }
                         }

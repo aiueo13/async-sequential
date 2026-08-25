@@ -6,8 +6,6 @@ mod task_error;
 mod task_handle;
 mod task_spawner;
 
-use internal::*;
-
 pub use executor_join_error::ExecutorJoinError;
 pub use executor::Executor;
 pub use task_spawner::TaskSpawner;
@@ -15,6 +13,45 @@ pub use task_canceller::TaskCanceller;
 pub use task_error::TaskError;
 pub use task_handle::TaskHandle;
 
+
+#[cfg(test)]
+mod test_readme {
+    use crate as async_sequential;
+    use std::{thread, time::Duration};
+    use tokio::time::sleep;
+
+    #[tokio::test]
+    async fn test() {
+        let executor = async_sequential::Executor::new(Vec::new());
+
+        executor.spawn(move |state: &mut Vec<u64>| Box::pin(async move {
+            sleep(Duration::from_secs(1)).await;
+            state.push(1);
+        }));
+
+        let spawner = executor.spawner();
+        tokio::spawn(async move {
+            let task_handle1 = spawner.spawn_blocking(move |state| {
+                thread::sleep(Duration::from_secs(2));
+                state.push(2);
+                "hello"
+            });
+            let task_handle2 = spawner.spawn(move |state| Box::pin(async move {
+                sleep(Duration::from_secs(1)).await;
+                state.push(3);
+                "world"
+            }));
+
+            assert_eq!(task_handle1.await.unwrap(), "hello");
+            assert_eq!(task_handle2.await.unwrap(), "world");
+        });
+
+        // Wait for all tasks to complete.
+        // NOTE: This does not complete as long as `spawner` has not been dropped.
+        let result = executor.join().await;
+        assert_eq!(result, vec![1, 2, 3]);
+    }
+}
 
 #[cfg(test)]
 mod tests3 {
@@ -461,6 +498,55 @@ mod tests3 {
         assert!(!err.is_task_panic());
         assert!(err.is_prev_task_panic());
         assert!(!err.is_cancelled());
+    }
+
+    #[tokio::test]
+    async fn test_execute() {
+        let executor = Executor::new(0);
+
+        for _ in 0..10000 {
+            executor.execute(|s| Box::pin(async {
+                *s += 1;
+            })).await;
+
+            executor.execute_blocking(|s| {
+                *s += 1;
+            }).await;
+        }
+        
+        assert_eq!(executor.join().await, 20000);
+    }
+
+    #[tokio::test]
+    #[should_panic]
+    async fn test_execute_panicked() {
+        let executor = Executor::new(());
+        executor.execute(|_| Box::pin(async { panic!() })).await;
+    }
+
+    #[tokio::test]
+    #[should_panic]
+    async fn test_execute_blocking_panicked() {
+        let executor = Executor::new(());
+        executor.execute_blocking(|_| { panic!() }).await;
+    }
+
+    #[tokio::test]
+    #[should_panic]
+    async fn test_execute_panicked_after_panic() {
+        let executor = Executor::new(());
+        let h = executor.spawn(|_| Box::pin(async { panic!()}));
+        assert!(h.await.unwrap_err().is_task_panic());
+        executor.execute(|_| Box::pin(async { })).await;
+    }
+
+    #[tokio::test]
+    #[should_panic]
+    async fn test_execute_blocking_panicked_after_panic() {
+        let executor = Executor::new(());
+        let h = executor.spawn_blocking(|_| {});
+        assert!(h.await.unwrap_err().is_task_panic());
+        executor.execute_blocking(|_| {}).await;
     }
 }
 

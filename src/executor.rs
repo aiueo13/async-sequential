@@ -7,6 +7,9 @@ use std::{future::Future, pin::Pin, sync::{Arc, Mutex as SyncMutex}};
 /// Tasks are executed sequentially in the order they are queued,
 /// regardless of whether they are asynchronous or blocking.
 /// 
+/// The blocking task is executed using [Tokio's blocking thread pool](https://docs.rs/tokio/latest/tokio/task/fn.spawn_blocking.html)
+/// to avoid blocking the asynchronous runtime.
+/// 
 /// If a task panics, subsequent tasks also panic because the state invariants
 /// may have been violated by the task's panic.
 /// 
@@ -19,7 +22,7 @@ use std::{future::Future, pin::Pin, sync::{Arc, Mutex as SyncMutex}};
 /// ```
 /// # fn main() {
 /// # tokio_test::block_on(async {
-/// use std::time::Duration;
+/// use std::{thread, time::Duration};
 /// use tokio::time::sleep;
 /// 
 /// let executor = async_sequential::Executor::new(Vec::new());
@@ -32,10 +35,12 @@ use std::{future::Future, pin::Pin, sync::{Arc, Mutex as SyncMutex}};
 /// let spawner = executor.spawner();
 /// tokio::spawn(async move {
 ///     let task_handle1 = spawner.spawn_blocking(move |state| {
+///         thread::sleep(Duration::from_secs(2));
 ///         state.push(2);
 ///         "hello"
 ///     });
 ///     let task_handle2 = spawner.spawn(move |state| Box::pin(async move {
+///         sleep(Duration::from_secs(1)).await;
 ///         state.push(3);
 ///         "world"
 ///     }));
@@ -60,7 +65,7 @@ enum Worker<S> {
         state: S,
     },
     Started {
-        worker_handle: WorkerHandle<S>,
+        worker_handle: internal::WorkerHandle<S>,
     },
 }
 
@@ -281,10 +286,14 @@ impl<S: Send + 'static> Executor<S> {
         T: for<'a> FnOnce(&'a mut S) -> Pin<Box<dyn Future<Output = R> + Send + 'a>> + Send + 'static,
         R: Send + 'static,
     {
-        let (task, task_result, task_controller) = build_async_task(task);
+        let (task, task_result, task_canceller) = internal::build_async_task(task);
         match self.send(task) {
-            Ok(worker_state) => TaskHandle::new(task_result, task_controller, worker_state),
-            Err(WorkerSendError::PrevTaskPanic { panic_msg }) => TaskHandle::prev_task_already_panicked(panic_msg),
+            Ok(worker_state) => {
+                TaskHandle::new(task_result, task_canceller, worker_state)
+            },
+            Err(internal::WorkerSendError::PrevTaskPanic { panic_msg }) => {
+                TaskHandle::prev_task_panicked(panic_msg)
+            },
         }
     }
 
@@ -295,7 +304,7 @@ impl<S: Send + 'static> Executor<S> {
     /// Tasks are executed sequentially in the order they are queued,
     /// regardless of whether they are asynchronous or blocking.
     /// 
-    /// The blocking task is executed using the runtime's blocking thread pool
+    /// The blocking task is executed using [Tokio's blocking thread pool](https://docs.rs/tokio/latest/tokio/task/fn.spawn_blocking.html)
     /// to avoid blocking the asynchronous runtime.
     /// 
     /// # Panics
@@ -318,10 +327,14 @@ impl<S: Send + 'static> Executor<S> {
         T: (FnOnce(&mut S) -> R) + Send + 'static,
         R: Send + 'static,
     {
-        let (task, task_result, task_controller) = build_blocking_task(task);
+        let (task, task_result, task_canceller) = internal::build_blocking_task(task);
         match self.send(task) {
-            Ok(worker_state) => TaskHandle::new(task_result, task_controller, worker_state),
-            Err(WorkerSendError::PrevTaskPanic { panic_msg }) => TaskHandle::prev_task_already_panicked(panic_msg),
+            Ok(worker_state) => {
+                TaskHandle::new(task_result, task_canceller, worker_state)
+            },
+            Err(internal::WorkerSendError::PrevTaskPanic { panic_msg }) => {
+                TaskHandle::prev_task_panicked(panic_msg)
+            },
         }
     }
 
@@ -354,7 +367,16 @@ impl<S: Send + 'static> Executor<S> {
         T: for<'a> FnOnce(&'a mut S) -> Pin<Box<dyn Future<Output = R> + Send + 'a>> + Send + 'static,
         R: Send + 'static,
     {
-        self.spawn(task).await.unwrap_or_else(|e| e.panic())
+        let (task, task_result) = internal::build_uncancellable_async_task(task);
+        let task_handle = match self.send(task) {
+            Ok(worker_state) => {
+                TaskHandle::new_scoped_noncancellable(task_result, worker_state)
+            },
+            Err(internal::WorkerSendError::PrevTaskPanic { panic_msg }) => {
+                TaskHandle::prev_task_panicked(panic_msg)
+            },
+        };
+        task_handle.await.unwrap_or_else(|e| e.panic())
     }
 
     /// Queues a blocking task for sequential execution and waits for it to complete.
@@ -363,7 +385,7 @@ impl<S: Send + 'static> Executor<S> {
     /// Tasks are executed sequentially in the order they are queued,
     /// regardless of whether they are asynchronous or blocking.
     /// 
-    /// The blocking task is executed using the runtime's blocking thread pool
+    /// The blocking task is executed using [Tokio's blocking thread pool](https://docs.rs/tokio/latest/tokio/task/fn.spawn_blocking.html)
     /// to avoid blocking the asynchronous runtime.
     /// 
     /// This is a convenient wrapper around [spawn_blocking](Executor::spawn_blocking).
@@ -389,11 +411,20 @@ impl<S: Send + 'static> Executor<S> {
         T: (FnOnce(&mut S) -> R) + Send + 'static,
         R: Send + 'static,
     {
-        self.spawn_blocking(task).await.unwrap_or_else(|e| e.panic())
+        let (task, task_result) = internal::build_uncancellable_blocking_task(task);
+        let task_handle = match self.send(task) {
+            Ok(worker_state) => {
+                TaskHandle::new_scoped_noncancellable(task_result, worker_state)
+            },
+            Err(internal::WorkerSendError::PrevTaskPanic { panic_msg }) => {
+                TaskHandle::prev_task_panicked(panic_msg)
+            },
+        };
+        task_handle.await.unwrap_or_else(|e| e.panic())
     }
 
 
-    fn send(&self, task: Task<S>) -> Result<Arc<WorkerState>, WorkerSendError> {
+    fn send(&self, task: internal::Task<S>) -> Result<Arc<internal::WorkerState>, internal::WorkerSendError> {
         let mut locked_worker = self.worker.lock().unwrap();
 
         if let Some(Worker::Started { ref worker_handle }) = *locked_worker {
@@ -404,16 +435,16 @@ impl<S: Send + 'static> Executor<S> {
             unreachable!("illegal closed executor")
         };
 
-        let worker_handle = spawn_worker(state);
+        let worker_handle = internal::spawn_worker(state);
         let worker_state = match worker_handle.send(task) {
             Ok(worker_state) => worker_state,
-            Err(WorkerSendError::PrevTaskPanic { .. }) => unreachable!(),
+            Err(internal::WorkerSendError::PrevTaskPanic { .. }) => unreachable!(),
         };
         *locked_worker = Some(Worker::Started { worker_handle });
         Ok(worker_state)
     }
 
-    fn sender(&self) -> WorkerTaskSender<S> {
+    fn sender(&self) -> internal::WorkerTaskSender<S> {
         let mut locked_worker = self.worker.lock().unwrap();
 
         if let Some(Worker::Started { ref worker_handle }) = *locked_worker {
@@ -424,7 +455,7 @@ impl<S: Send + 'static> Executor<S> {
             unreachable!("illegal closed executor")
         };
 
-        let worker_handle = spawn_worker(state);
+        let worker_handle = internal::spawn_worker(state);
         let task_sender = worker_handle.sender();
         *locked_worker = Some(Worker::Started { worker_handle });
         task_sender

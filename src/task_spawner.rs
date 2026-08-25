@@ -17,12 +17,12 @@ use std::pin::Pin;
 /// To allow it to complete, either drop all TaskSpawners
 /// or call [Executor::close_spawners] beforehand.
 pub struct TaskSpawner<S> {
-    sender: WorkerTaskSender<S>,
+    sender: internal::WorkerTaskSender<S>,
 }
 
 impl<S> TaskSpawner<S> {
 
-    pub(crate) fn new(sender: WorkerTaskSender<S>) -> Self {
+    pub(crate) fn new(sender: internal::WorkerTaskSender<S>) -> Self {
         Self { sender }
     }
 }
@@ -81,13 +81,17 @@ impl<S: Send + 'static> TaskSpawner<S> {
         T: for<'a> FnOnce(&'a mut S) -> Pin<Box<dyn Future<Output = R> + Send + 'a>> + Send + 'static,
         R: Send + 'static,
     {
-        use WorkerTaskSenderSendError as Error;
-
-        let (task, task_result, task_controller) = build_async_task(task);
+        let (task, task_result, task_controller) = internal::build_async_task(task);
         match self.sender.send(task) {
-            Ok(worker_state) => TaskHandle::new(task_result, task_controller, worker_state),
-            Err(Error::Unavailable) => TaskHandle::worker_task_sender_unavailable(),
-            Err(Error::PrevTaskPanic { panic_msg }) => TaskHandle::prev_task_already_panicked(panic_msg),
+            Ok(worker_state) => {
+                TaskHandle::new(task_result, task_controller, worker_state)
+            },
+            Err(internal::WorkerTaskSenderSendError::PrevTaskPanic { panic_msg }) => {
+                TaskHandle::prev_task_panicked(panic_msg)
+            },
+            Err(internal::WorkerTaskSenderSendError::Unavailable) => {
+                TaskHandle::worker_task_sender_unavailable()
+            } 
         }
     }
 
@@ -98,7 +102,7 @@ impl<S: Send + 'static> TaskSpawner<S> {
     /// Tasks are executed sequentially in the order they are queued,
     /// regardless of whether they are asynchronous or blocking.
     /// 
-    /// The blocking task is executed using the runtime's blocking thread pool
+    /// The blocking task is executed using [Tokio's blocking thread pool](https://docs.rs/tokio/latest/tokio/task/fn.spawn_blocking.html)
     /// to avoid blocking the asynchronous runtime.
     /// 
     /// This method is equivalent to [Executor::spawn_blocking],
@@ -115,13 +119,17 @@ impl<S: Send + 'static> TaskSpawner<S> {
         T: (FnOnce(&mut S) -> R) + Send + 'static,
         R: Send + 'static,
     {
-        use WorkerTaskSenderSendError as Error;
-
-        let (task, task_result, task_controller) = build_blocking_task(task);
+        let (task, task_result, task_controller) = internal::build_blocking_task(task);
         match self.sender.send(task) {
-            Ok(worker_state) => TaskHandle::new(task_result, task_controller, worker_state),
-            Err(Error::Unavailable) => TaskHandle::worker_task_sender_unavailable(),
-            Err(Error::PrevTaskPanic { panic_msg }) => TaskHandle::prev_task_already_panicked(panic_msg),
+            Ok(worker_state) => {
+                TaskHandle::new(task_result, task_controller, worker_state)
+            },
+            Err(internal::WorkerTaskSenderSendError::PrevTaskPanic { panic_msg }) => {
+                TaskHandle::prev_task_panicked(panic_msg)
+            },
+            Err(internal::WorkerTaskSenderSendError::Unavailable) => {
+                TaskHandle::worker_task_sender_unavailable()
+            } 
         }
     }
 }
@@ -422,6 +430,25 @@ mod tests {
 
         let h = spawner.spawn(|_| Box::pin(async {}));
         assert!(h.await.unwrap_err().is_task_spawner_unavailable());
+    }
+
+    #[tokio::test]
+    async fn test16() {
+        let executor = Executor::new(0);
+        
+        for _ in 0..1000 {
+            let spawner = executor.spawner();
+            spawn(async move {
+                for _ in 0..1000 {
+                    spawner.spawn(|s| Box::pin(async {
+                        *s += 1;
+                    }));
+                }
+            });
+        }
+    
+        let result = executor.join().await;
+        assert_eq!(result, 1000 * 1000);
     }
 }
 

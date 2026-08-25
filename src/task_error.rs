@@ -13,7 +13,7 @@ enum Repr {
     TaskSpawnerUnavailable,
     TaskCancelled,
     TaskPanic {
-        panic: PanicPayload
+        panic: internal::PanicPayload
     },
     PrevTaskPanic {
         panic_msg: Option<Arc<String>>
@@ -22,7 +22,7 @@ enum Repr {
 
 impl TaskError {
 
-    pub(crate) fn task_panicked(panic: PanicPayload) -> Self {
+    pub(crate) fn task_panicked(panic: internal::PanicPayload) -> Self {
         Self { repr: Repr::TaskPanic { panic } }
     }
 

@@ -1,6 +1,6 @@
 [package]
 name = "async-sequential"
-version = "0.7.3"
+version = "0.7.4"
 edition = "2024"
 authors = ["OkaYu"]
 license = "MIT OR Apache-2.0"
@@ -10,7 +10,12 @@ repository = "https://github.com/aiueo13/async-sequential"
 readme = "README.md"
 
 [dependencies]
-tokio = { version = "1", features = ["sync", "rt"] }
+tokio = { version = "1", default-features = false, features = [
+    # For `tokio::task::spawn` and `tokio::task::spawn_blocking`
+    "rt",
+    # For `tokio::sync::oneshot`
+    "sync"
+] }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["sync", "rt", "macros", "time", "rt-multi-thread"] }

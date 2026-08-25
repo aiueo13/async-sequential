@@ -1,12 +1,12 @@
 use super::*;
 use std::{borrow::Cow, panic, sync::{Arc, Mutex as SyncMutex, OnceLock, atomic::{AtomicU8, Ordering}}};
-use tokio::{spawn, sync::{mpsc, watch}, task::{AbortHandle, JoinHandle, JoinError, spawn_blocking}};
+use tokio::{sync::mpsc, task::{AbortHandle, JoinHandle, JoinError, spawn, spawn_blocking}};
 
 
 pub fn spawn_worker<S: Send + 'static>(mut state: S) -> WorkerHandle<S> {
     let (task_tx, mut task_rx) = mpsc::unbounded_channel::<Task<S>>();
     let worker_state = Arc::new(WorkerState::new());
-    let (panic_sender_tx, mut panic_sender_rx) = watch::channel(None);
+    let (panic_sender_tx, panic_sender_rx) = slot();
 
     let (worker_handle, worker_join_handle) = {
         let worker_state = Arc::clone(&worker_state);
@@ -20,7 +20,7 @@ pub fn spawn_worker<S: Send + 'static>(mut state: S) -> WorkerHandle<S> {
                     continue;
                 };
 
-                let _ = panic_sender_tx.send(Some(OnceTake::new(panic_sender)));
+                panic_sender_tx.set(panic_sender);
 
                 match task {
                     RawTask::Blocking(task) => {
@@ -60,10 +60,7 @@ pub fn spawn_worker<S: Send + 'static>(mut state: S) -> WorkerHandle<S> {
                         if let Some(panic) = e.try_into_panic().ok() {
                             let panic = PanicPayload::new(panic);
                             task_panic_msg = panic.msg().map(|s| s.to_string());
-
-                            let panic_sender = panic_sender_rx.borrow_and_update();
-                            let panic_sender = panic_sender.as_ref();
-                            if let Some(panic_sender) = panic_sender.and_then(|r| r.take()) { 
+                            if let Some(panic_sender) = panic_sender_rx.take() { 
                                 panic_sender.send(panic);
                             }
                         }
