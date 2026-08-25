@@ -2,7 +2,7 @@ use crate::*;
 use std::{pin::Pin, sync::Arc, task::Poll};
 
 
-/// Handle for waiting for a task to complete.
+/// A handle for waiting for a task to complete.
 ///
 /// Awaiting the handle returns the task's result if the task completes successfully,
 /// or a [TaskError] if the task could not complete.
@@ -76,11 +76,11 @@ impl<R> TaskHandle<R> {
     /// use std::time::Duration;
     /// use tokio::time::sleep;
     /// 
-    /// let executor = async_sequential::Executor::new(());
+    /// let queue = async_sequential::JoinQueue::new(());
     /// 
     /// // The task is not cancelled
     /// // when the handle cancels it while it is running.
-    /// let handle = executor.spawn(move |_| Box::pin(async move {
+    /// let handle = queue.spawn(move |_| Box::pin(async move {
     ///     sleep(Duration::from_secs(2)).await;
     /// }));
     /// sleep(Duration::from_secs(1)).await;
@@ -89,20 +89,20 @@ impl<R> TaskHandle<R> {
     /// 
     /// // The task is cancelled
     /// // when the handle cancels it before running.
-    /// let _ = executor.spawn(move |_| Box::pin(async move {
+    /// let _ = queue.spawn(move |_| Box::pin(async move {
     ///     sleep(Duration::from_secs(1)).await;
     /// }));
-    /// let handle = executor.spawn(move |_| Box::pin(async move { }));
+    /// let handle = queue.spawn(move |_| Box::pin(async move { }));
     /// assert!(handle.cancel());
     /// assert!(handle.await.unwrap_err().is_cancelled());
     /// 
     /// // The task is cancelled but `cancel` returns false
-    /// // because the executor is dropped before `cancel` is called and aborts the task.
-    /// let handle = executor.spawn(move |_| Box::pin(async move {
+    /// // because the JoinQueue is dropped before `cancel` is called and aborts the task.
+    /// let handle = queue.spawn(move |_| Box::pin(async move {
     ///     sleep(Duration::from_secs(2)).await;
     /// }));
     /// sleep(Duration::from_secs(1)).await;
-    /// drop(executor);
+    /// drop(queue);
     /// assert!(!handle.cancel());
     /// assert!(handle.await.unwrap_err().is_cancelled());
     /// # });
@@ -136,9 +136,9 @@ impl<R> TaskHandle<R> {
     /// use std::time::Duration;
     /// use tokio::time::sleep;
     ///
-    /// let executor = async_sequential::Executor::new(());
+    /// let queue = async_sequential::JoinQueue::new(());
     ///
-    /// let handle = executor.spawn(move |_| Box::pin(async move {
+    /// let handle = queue.spawn(move |_| Box::pin(async move {
     ///     sleep(Duration::from_secs(1)).await;
     /// }));
     ///

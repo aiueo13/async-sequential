@@ -2,20 +2,24 @@ use crate::*;
 use std::{future::Future, pin::Pin, sync::{Arc, Mutex as SyncMutex}};
 
 
-/// Executor for running asynchronous and blocking tasks sequentially on a shared mutable state.
+/// A FIFO queue for running asynchronous
+/// and blocking tasks sequentially on a shared mutable state,
+/// allowing the final state to be obtained after all tasks complete.
 /// 
-/// Tasks are executed sequentially in the order they are queued,
+/// Tasks are executed on executed sequentially in the order they are queued,
 /// regardless of whether they are asynchronous or blocking.
 /// 
+/// This JoinQueue does not provide an async runtime or its own thread pool. 
+/// Tasks are executed on Tokio async runtime.
 /// The blocking task is executed using [Tokio's blocking thread pool](https://docs.rs/tokio/latest/tokio/task/fn.spawn_blocking.html)
 /// to avoid blocking the asynchronous runtime.
 /// 
 /// If a task panics, subsequent tasks also panic because the state invariants
 /// may have been violated by the task's panic.
 /// 
-/// When the Executor is dropped, all tasks in the Executor are immediately aborted.
+/// When the JoinQueue is dropped, all tasks in the JoinQueue are immediately aborted.
 /// Note that blocking tasks are not asynchronous, so if one is already running,
-/// aborting it only detaches the task from the Executor; 
+/// aborting it only detaches the task from the JoinQueue; 
 /// it continues running normally.
 /// 
 /// # Examples
@@ -25,14 +29,15 @@ use std::{future::Future, pin::Pin, sync::{Arc, Mutex as SyncMutex}};
 /// use std::{thread, time::Duration};
 /// use tokio::time::sleep;
 /// 
-/// let executor = async_sequential::Executor::new(Vec::new());
+/// let queue = async_sequential::JoinQueue::new(Vec::new());
 ///
-/// executor.spawn(move |state: &mut Vec<u64>| Box::pin(async move {
+/// queue.spawn(move |state: &mut Vec<u64>| Box::pin(async move {
 ///     sleep(Duration::from_secs(1)).await;
 ///     state.push(1);
 /// }));
 ///
-/// let spawner = executor.spawner();
+/// // A spawner can be used to spawn tasks from another thread or asynchronous task.
+/// let spawner = queue.spawner();
 /// tokio::spawn(async move {
 ///     let task_handle1 = spawner.spawn_blocking(move |state| {
 ///         thread::sleep(Duration::from_secs(2));
@@ -47,16 +52,19 @@ use std::{future::Future, pin::Pin, sync::{Arc, Mutex as SyncMutex}};
 /// 
 ///     assert_eq!(task_handle1.await.unwrap(), "hello");
 ///     assert_eq!(task_handle2.await.unwrap(), "world");
+/// 
+///     // Ensure the spawner to drop to allow `join()` to complete.
+///     drop(spawner);
 /// });
 ///
 /// // Wait for all tasks to complete.
-/// // NOTE: This does not complete as long as `spawner` has not been dropped.
-/// let result = executor.join().await;
+/// // NOTE: This does not complete as long as any spawner remains alive.
+/// let result = queue.join().await;
 /// assert_eq!(result, vec![1, 2, 3]);
 /// # });
 /// # }
 /// ``` 
-pub struct Executor<S> {
+pub struct JoinQueue<S> {
     worker: SyncMutex<Option<Worker<S>>>,
 }
 
@@ -69,11 +77,11 @@ enum Worker<S> {
     },
 }
 
-impl<S> Executor<S> {
+impl<S> JoinQueue<S> {
 
-    /// Creates a new Executor with the given initial state.
+    /// Creates a new JoinQueue with the given initial state.
     ///
-    /// The state is owned by the Executor
+    /// The state is owned by the JoinQueue
     /// and is made available to tasks through exclusive mutable access.
     pub const fn new(state: S) -> Self {
         Self {
@@ -84,9 +92,9 @@ impl<S> Executor<S> {
     /// Waits for all tasks to complete and returns the final state.
     ///
     /// Note that this method does not complete as long as any [TaskSpawner]
-    /// obtained from [spawner](Executor::spawner) remains alive.
+    /// obtained from [spawner](JoinQueue::spawner) remains alive.
     /// To allow it to complete, either drop all TaskSpawners
-    /// or call [close_spawners](Executor::close_spawners) beforehand.
+    /// or call [close_spawners](JoinQueue::close_spawners) beforehand.
     /// 
     /// # Panics
     /// Panics if any task panicked before or during this method,
@@ -98,31 +106,31 @@ impl<S> Executor<S> {
     /// Waits for all tasks to complete and returns the final state.
     ///
     /// Note that this method does not complete as long as any [TaskSpawner]
-    /// obtained from [spawner](Executor::spawner) remains alive.
+    /// obtained from [spawner](JoinQueue::spawner) remains alive.
     /// To allow it to complete, either drop all TaskSpawners
-    /// or call [close_spawners](Executor::close_spawners) beforehand.
+    /// or call [close_spawners](JoinQueue::close_spawners) beforehand.
     /// 
     /// # Errors
     /// Returns an error if any task panicked before or during this method.
     /// 
     /// # Panics
     /// Panics if this method is called outside Tokio runtime.
-    pub async fn try_join(self) -> Result<S, ExecutorJoinError> {
+    pub async fn try_join(self) -> Result<S, StatefulQueueJoinError> {
         let worker = self.worker.lock().unwrap().take();
         match worker {
             Some(Worker::Unstarted { state, .. }) => Ok(state),
             Some(Worker::Started { worker_handle }) => Ok(worker_handle.join().await?),
-            None => unreachable!("illegal closed executor"),
+            None => unreachable!("illegal closed queue"),
         }
     }
 
     /// Cancels all queued tasks and prevents subsequent tasks from being queued, 
-    /// detaches the currently running task from the Executor so that it can continue running.
+    /// detaches the currently running task from the JoinQueue so that it can continue running.
     /// 
     /// This method **does not abort a running task**.
-    /// To abort the currently running task, drop the Executor itself.
+    /// To abort the currently running task, drop the JoinQueue itself.
     /// Note that blocking tasks are not asynchronous, so if one is already running,
-    /// aborting it only detaches the task from the Executor; 
+    /// aborting it only detaches the task from the JoinQueue; 
     /// it continues running normally.
     /// 
     /// # Examples
@@ -132,18 +140,18 @@ impl<S> Executor<S> {
     /// use std::time::Duration;
     /// use tokio::time::sleep;
     /// 
-    /// let executor = async_sequential::Executor::new(());
+    /// let queue = async_sequential::JoinQueue::new(());
     /// 
-    /// let running = executor.spawn(move |_| Box::pin(async move {
+    /// let running = queue.spawn(move |_| Box::pin(async move {
     ///     sleep(Duration::from_secs(2)).await;
     ///     "complete"
     /// }));
-    /// let pending = executor.spawn(move |_| Box::pin(async move {
+    /// let pending = queue.spawn(move |_| Box::pin(async move {
     ///     "never"
     /// }));
     /// 
     /// sleep(Duration::from_secs(1)).await;
-    /// executor.cancel();
+    /// queue.cancel();
     /// assert!(pending.await.unwrap_err().is_cancelled());
     /// assert_eq!(running.await.unwrap(), "complete");
     /// # });
@@ -154,7 +162,7 @@ impl<S> Executor<S> {
         match worker {
             Some(Worker::Unstarted { .. }) => {},
             Some(Worker::Started { worker_handle }) => worker_handle.cancel(),
-            None => unreachable!("illegal closed executor"),
+            None => unreachable!("illegal closed queue"),
         }
     }
 
@@ -182,16 +190,16 @@ impl<S> Executor<S> {
     /// 
     /// # Panics
     /// Panics if this method is called outside Tokio runtime.
-    pub async fn cancel_and_try_join(self) -> Result<S, ExecutorJoinError> {
+    pub async fn cancel_and_try_join(self) -> Result<S, StatefulQueueJoinError> {
         let worker = self.worker.lock().unwrap().take();
         match worker {
             Some(Worker::Unstarted { state, .. }) => Ok(state),
             Some(Worker::Started { worker_handle }) => Ok(worker_handle.cancel_and_join().await?),
-            None => unreachable!("illegal closed executor"),
+            None => unreachable!("illegal closed queue"),
         }
     }
 
-    /// Returns true if a task previously executed by this Executor has panicked.
+    /// Returns true if a task previously executed by this JoinQueue has panicked.
     /// 
     /// Once a task has panicked,
     /// [TaskHandle]s obtained from [spawn](Self::spawn) or [spawn_blocking](Self::spawn_blocking)
@@ -203,11 +211,11 @@ impl<S> Executor<S> {
         match &*worker {
             Some(Worker::Unstarted { .. }) => false,
             Some(Worker::Started { worker_handle }) => worker_handle.has_panicked(),
-            None => unreachable!("illegal closed executor"),
+            None => unreachable!("illegal closed queue"),
         }
     }
 
-    /// Closes all [TaskSpawner]s currently associated with this Executor.
+    /// Closes all [TaskSpawner]s currently associated with this JoinQueue.
     ///
     /// After this method is called, all existing TaskSpawners can no longer spawn new tasks.
     /// Tasks that have already been queued or are currently running are unaffected.
@@ -217,25 +225,25 @@ impl<S> Executor<S> {
         match &mut *worker {
             Some(Worker::Unstarted { .. }) => {},
             Some(Worker::Started { worker_handle }) => worker_handle.close_task_senders(),
-            None => unreachable!("illegal closed executor"),
+            None => unreachable!("illegal closed queue"),
         }
     }
 }
 
-impl<S: Send + 'static> Executor<S> {
+impl<S: Send + 'static> JoinQueue<S> {
 
-    /// Returns a [TaskSpawner] for queuing tasks onto this Executor.
+    /// Returns a [TaskSpawner] for queuing tasks onto this JoinQueue.
     ///
-    /// TaskSpawner provides methods equivalent to [spawn](Executor::spawn) and [spawn_blocking](Executor::spawn_blocking),
+    /// TaskSpawner provides methods equivalent to [spawn](JoinQueue::spawn) and [spawn_blocking](JoinQueue::spawn_blocking),
     /// except that the returned [TaskHandle] immediately returns an error
     /// if the TaskSpawner can no longer spawn tasks,
     /// such as when the TaskSpawner has been closed
-    /// or the Executor has been aborted or cancelled.
+    /// or the JoinQueue has been aborted or cancelled.
     /// In such cases, [TaskError::is_task_spawner_unavailable] returns true.
     /// 
-    /// Note that [join](Executor::join) and [try_join](Executor::try_join) does not complete as long as any TaskSpawner remains alive.
+    /// Note that [join](JoinQueue::join) and [try_join](JoinQueue::try_join) does not complete as long as any TaskSpawner remains alive.
     /// To allow it to complete, either drop all TaskSpawners
-    /// or call [close_spawners](Executor::close_spawners) beforehand.
+    /// or call [close_spawners](JoinQueue::close_spawners) beforehand.
     /// 
     /// # Panics
     /// Panics if this method is called outside Tokio runtime.
@@ -244,14 +252,14 @@ impl<S: Send + 'static> Executor<S> {
     /// ```
     /// # fn main() {
     /// # tokio_test::block_on(async {
-    /// let executor = async_sequential::Executor::new(());
-    /// let spawner = executor.spawner();
+    /// let queue = async_sequential::JoinQueue::new(());
+    /// let spawner = queue.spawner();
     /// 
     /// spawner.spawn(move |_| Box::pin(async move {}));
     /// 
     /// // Ensures that the spawner is closed before join.
     /// drop(spawner);
-    /// assert!(executor.try_join().await.is_ok());
+    /// assert!(queue.try_join().await.is_ok());
     /// # });
     /// # }
     /// ```
@@ -273,9 +281,9 @@ impl<S: Send + 'static> Executor<S> {
     /// ```
     /// # fn main() {
     /// # tokio_test::block_on(async {
-    /// let executor = async_sequential::Executor::new(Vec::new());
+    /// let queue = async_sequential::JoinQueue::new(Vec::new());
     /// 
-    /// executor.spawn(move |state| Box::pin(async move {
+    /// queue.spawn(move |state| Box::pin(async move {
     ///     state.push(0);
     /// }));
     /// # });
@@ -314,9 +322,9 @@ impl<S: Send + 'static> Executor<S> {
     /// ```
     /// # fn main() {
     /// # tokio_test::block_on(async {
-    /// let executor = async_sequential::Executor::new(Vec::new());
+    /// let queue = async_sequential::JoinQueue::new(Vec::new());
     /// 
-    /// executor.spawn_blocking(move |state| {
+    /// queue.spawn_blocking(move |state| {
     ///     state.push(0);
     /// });
     /// # });
@@ -344,7 +352,7 @@ impl<S: Send + 'static> Executor<S> {
     /// Tasks are executed sequentially in the order they are queued,
     /// regardless of whether they are asynchronous or blocking.
     /// 
-    /// This is a convenient wrapper around [spawn](Executor::spawn).
+    /// This is a convenient wrapper around [spawn](JoinQueue::spawn).
     /// 
     /// # Panics
     /// Panics if the task or any previous task panicked,
@@ -354,9 +362,9 @@ impl<S: Send + 'static> Executor<S> {
     /// ```
     /// # fn main() {
     /// # tokio_test::block_on(async {
-    /// let executor = async_sequential::Executor::new(Vec::new());
+    /// let queue = async_sequential::JoinQueue::new(Vec::new());
     /// 
-    /// executor.execute(move |state| Box::pin(async move {
+    /// queue.execute(move |state| Box::pin(async move {
     ///     state.push(0);
     /// })).await;
     /// # });
@@ -388,7 +396,7 @@ impl<S: Send + 'static> Executor<S> {
     /// The blocking task is executed using [Tokio's blocking thread pool](https://docs.rs/tokio/latest/tokio/task/fn.spawn_blocking.html)
     /// to avoid blocking the asynchronous runtime.
     /// 
-    /// This is a convenient wrapper around [spawn_blocking](Executor::spawn_blocking).
+    /// This is a convenient wrapper around [spawn_blocking](JoinQueue::spawn_blocking).
     /// 
     /// # Panics
     /// Panics if the task or any previous task panicked,
@@ -398,9 +406,9 @@ impl<S: Send + 'static> Executor<S> {
     /// ```
     /// # fn main() {
     /// # tokio_test::block_on(async {
-    /// let executor = async_sequential::Executor::new(Vec::new());
+    /// let queue = async_sequential::JoinQueue::new(Vec::new());
     /// 
-    /// executor.execute_blocking(move |state| {
+    /// queue.execute_blocking(move |state| {
     ///     state.push(0);
     /// }).await;
     /// # });
@@ -432,7 +440,7 @@ impl<S: Send + 'static> Executor<S> {
         }
 
         let Some(Worker::Unstarted { state }) = locked_worker.take() else {
-            unreachable!("illegal closed executor")
+            unreachable!("illegal closed queue")
         };
 
         let worker_handle = internal::spawn_worker(state);
@@ -452,7 +460,7 @@ impl<S: Send + 'static> Executor<S> {
         }
 
         let Some(Worker::Unstarted { state }) = locked_worker.take() else {
-            unreachable!("illegal closed executor")
+            unreachable!("illegal closed queue")
         };
 
         let worker_handle = internal::spawn_worker(state);
@@ -462,14 +470,14 @@ impl<S: Send + 'static> Executor<S> {
     }
 }
 
-impl<S: Default> Default for Executor<S> {
+impl<S: Default> Default for JoinQueue<S> {
 
     fn default() -> Self {
         Self::new(S::default())
     }
 }
 
-impl<S> Drop for Executor<S> {
+impl<S> Drop for JoinQueue<S> {
 
     fn drop(&mut self) {
         let worker = self.worker.lock().ok().and_then(|mut w| w.take());
@@ -490,29 +498,29 @@ mod tests {
 
     #[allow(unused)]
     fn assert_impls() {
-        let executor = Executor::new(());
-        require_send_static(executor.join());
+        let queue = JoinQueue::new(());
+        require_send_static(queue.join());
 
-        let executor = Executor::new(());
-        require_send_static(executor.try_join());
+        let queue = JoinQueue::new(());
+        require_send_static(queue.try_join());
 
-        let executor = Executor::new(());
-        require_send_static(executor.cancel_and_join());
+        let queue = JoinQueue::new(());
+        require_send_static(queue.cancel_and_join());
 
-        let executor = Executor::new(());
-        require_send_static(executor.cancel_and_try_join());
+        let queue = JoinQueue::new(());
+        require_send_static(queue.cancel_and_try_join());
 
-        let executor = Executor::new(());
-        require_send_static(executor.spawn(|_| Box::pin(async {})));
+        let queue = JoinQueue::new(());
+        require_send_static(queue.spawn(|_| Box::pin(async {})));
 
-        let executor = Executor::new(());
-        require_send_static(executor.spawn_blocking(|_| {}));
+        let queue = JoinQueue::new(());
+        require_send_static(queue.spawn_blocking(|_| {}));
 
-        let executor = Executor::new(());
-        require_send(executor.execute(|_| Box::pin(async {})));
+        let queue = JoinQueue::new(());
+        require_send(queue.execute(|_| Box::pin(async {})));
 
-        let executor = Executor::new(());
-        require_send(executor.execute_blocking(|_| {}));
-        require_send(executor);
+        let queue = JoinQueue::new(());
+        require_send(queue.execute_blocking(|_| {}));
+        require_send(queue);
     }
 }

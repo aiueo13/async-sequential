@@ -2,20 +2,20 @@ use crate::*;
 use std::pin::Pin;
 
 
-/// Handle for spawning tasks onto an executor.
+/// A handle for spawning tasks onto a [JoinQueue].
 ///
-/// It can be obtained from [Executor::spawner].
+/// It can be obtained from [JoinQueue::spawner].
 /// 
-/// It provides methods equivalent to [Executor::spawn] and [Executor::spawn_blocking],
+/// It provides methods equivalent to [JoinQueue::spawn] and [JoinQueue::spawn_blocking],
 /// except that the returned [TaskHandle] immediately returns an error
 /// if this TaskSpawner can no longer spawn tasks,
 /// such as when the TaskSpawner has been closed
-/// or the associated [Executor] has been aborted or cancelled.
+/// or the associated [JoinQueue] has been aborted or cancelled.
 /// In such cases, [TaskError::is_task_spawner_unavailable] returns true.
 /// 
-/// Note that [Executor::join] and [Executor::try_join] does not complete as long as any TaskSpawner remains alive.
+/// Note that [JoinQueue::join] and [JoinQueue::try_join] does not complete as long as any TaskSpawner remains alive.
 /// To allow it to complete, either drop all TaskSpawners
-/// or call [Executor::close_spawners] beforehand.
+/// or call [JoinQueue::close_spawners] beforehand.
 pub struct TaskSpawner<S> {
     sender: internal::WorkerTaskSender<S>,
 }
@@ -32,7 +32,7 @@ impl<S> TaskSpawner<S> {
     /// Returns true if this TaskSpawner can no longer spawn tasks.
     ///
     /// It occurs when the TaskSpawner has been closed
-    /// or the associated [Executor] has been aborted or cancelled.
+    /// or the associated [JoinQueue] has been aborted or cancelled.
     /// From this point onward,
     /// [TaskHandle]s obtained from [spawn](Self::spawn) or [spawn_blocking](Self::spawn_blocking)
     /// immediately return errors for which [TaskError::is_task_spawner_unavailable] returns true.
@@ -40,7 +40,7 @@ impl<S> TaskSpawner<S> {
         self.sender.is_unavailable()
     }
 
-    /// Returns true if a task previously executed by the associated [Executor] has panicked.
+    /// Returns true if a task previously executed by the associated [JoinQueue] has panicked.
     /// 
     /// Once a task has panicked, while this TaskSpawner is not unavailable,
     /// [TaskHandle]s obtained from [spawn](Self::spawn) or [spawn_blocking](Self::spawn_blocking)
@@ -49,7 +49,7 @@ impl<S> TaskSpawner<S> {
     /// 
     /// Returns None if the TaskSpawner is unavailable.
     /// It occurs when the TaskSpawner has been closed
-    /// or the [Executor] has been aborted or cancelled.
+    /// or the [JoinQueue] has been aborted or cancelled.
     /// From this point onward, 
     /// [TaskHandle]s obtained from spawn or spawn_blocking
     /// immediately return errors for which [TaskError::is_task_spawner_unavailable] returns true.
@@ -67,11 +67,11 @@ impl<S: Send + 'static> TaskSpawner<S> {
     /// Tasks are executed sequentially in the order they are queued,
     /// regardless of whether they are asynchronous or blocking.
     ///
-    /// This method is equivalent to [Executor::spawn],
+    /// This method is equivalent to [JoinQueue::spawn],
     /// except that the returned TaskHandle immediately returns an error
     /// if this TaskSpawner can no longer spawn tasks,
     /// such as when the TaskSpawner has been closed
-    /// or the associated [Executor] has been aborted or cancelled.
+    /// or the associated [JoinQueue] has been aborted or cancelled.
     /// In such cases, [TaskError::is_task_spawner_unavailable] returns true.
     /// 
     /// # Panics
@@ -105,11 +105,11 @@ impl<S: Send + 'static> TaskSpawner<S> {
     /// The blocking task is executed using [Tokio's blocking thread pool](https://docs.rs/tokio/latest/tokio/task/fn.spawn_blocking.html)
     /// to avoid blocking the asynchronous runtime.
     /// 
-    /// This method is equivalent to [Executor::spawn_blocking],
+    /// This method is equivalent to [JoinQueue::spawn_blocking],
     /// except that the returned TaskHandle immediately returns an error
     /// if this TaskSpawner can no longer spawn tasks,
     /// such as when the TaskSpawner has been closed
-    /// or the associated [Executor] has been aborted or cancelled.
+    /// or the associated [JoinQueue] has been aborted or cancelled.
     /// In such cases, [TaskError::is_task_spawner_unavailable] returns true.
     /// 
     /// # Panics
@@ -143,8 +143,8 @@ mod tests {
     #[tokio::test]
     async fn test1() {
         let i = 1000;
-        let executor = Executor::new(0);
-        let spawner = executor.spawner();
+        let queue = JoinQueue::new(0);
+        let spawner = queue.spawner();
         
         for _ in 0..i {
             spawner.spawn(|count| Box::pin(async {
@@ -153,13 +153,13 @@ mod tests {
         }
 
         drop(spawner);
-        assert_eq!(executor.join().await, i);
+        assert_eq!(queue.join().await, i);
     }
 
     #[tokio::test]
     async fn test2() {
-        let executor = Executor::new(0);
-        let spawner = executor.spawner();
+        let queue = JoinQueue::new(0);
+        let spawner = queue.spawner();
         
         spawn(async move {
             sleep(Duration::from_secs(1)).await;
@@ -169,13 +169,13 @@ mod tests {
             drop(spawner);
         });
 
-        assert_eq!(executor.join().await, 1);
+        assert_eq!(queue.join().await, 1);
     }
 
     #[tokio::test]
     async fn test3() {
-        let executor = Executor::new(Vec::new());
-        let spawner = executor.spawner();
+        let queue = JoinQueue::new(Vec::new());
+        let spawner = queue.spawner();
         let (tx, rx) = oneshot::channel();
         let (tx2, rx2) = oneshot::channel();
         
@@ -196,10 +196,10 @@ mod tests {
         });
 
         rx.await.unwrap();
-        executor.close_spawners();
+        queue.close_spawners();
         tx2.send(()).unwrap();
 
-        let spawner = executor.spawner();
+        let spawner = queue.spawner();
         let h = spawner.spawn(|state| Box::pin(async {
             state.push("3");
         }));
@@ -207,13 +207,13 @@ mod tests {
         assert!(h.await.is_ok());
 
         drop(spawner);
-        assert_eq!(executor.join().await, vec!["1", "3"]);
+        assert_eq!(queue.join().await, vec!["1", "3"]);
     }
 
     #[tokio::test]
     async fn test4() {
-        let executor = Executor::new(0);
-        let spawner = executor.spawner();
+        let queue = JoinQueue::new(0);
+        let spawner = queue.spawner();
         
         for i in 0..1000 {
             if i % 2 == 0 {
@@ -224,7 +224,7 @@ mod tests {
                 }));
             }
             else {
-                executor.spawn(move |count| Box::pin(async move {
+                queue.spawn(move |count| Box::pin(async move {
                     if i == *count {
                         *count += 1;
                     }
@@ -233,21 +233,21 @@ mod tests {
         }
 
         drop(spawner);
-        assert_eq!(executor.join().await, 1000);
+        assert_eq!(queue.join().await, 1000);
     }
 
     #[tokio::test]
     async fn test5() {
-        let executor = Executor::new(0);
-        let spawner = executor.spawner();
+        let queue = JoinQueue::new(0);
+        let spawner = queue.spawner();
 
-        let h = executor.spawn(|_| Box::pin(async { panic!() }));
+        let h = queue.spawn(|_| Box::pin(async { panic!() }));
         let err = h.await.unwrap_err();
         assert!(err.is_panic());
         assert!(err.is_task_panic());
         assert!(!err.is_prev_task_panic());
 
-        executor.close_spawners();
+        queue.close_spawners();
         let h = spawner.spawn(|_| Box::pin(async {}));
         let err = h.await.unwrap_err();
         assert!(!err.is_panic());
@@ -257,16 +257,16 @@ mod tests {
 
     #[tokio::test]
     async fn test6() {
-        let executor = Executor::new(0);
-        let spawner = executor.spawner();
+        let queue = JoinQueue::new(0);
+        let spawner = queue.spawner();
 
-        let h = executor.spawn(|_| Box::pin(async { panic!() }));
+        let h = queue.spawn(|_| Box::pin(async { panic!() }));
         let err = h.await.unwrap_err();
         assert!(err.is_panic());
         assert!(err.is_task_panic());
         assert!(!err.is_prev_task_panic());
 
-        drop(executor);
+        drop(queue);
         let h = spawner.spawn(|_| Box::pin(async {}));
         let err = h.await.unwrap_err();
         assert!(!err.is_panic());
@@ -276,16 +276,16 @@ mod tests {
 
     #[tokio::test]
     async fn test7() {
-        let executor = Executor::new(0);
-        let spawner = executor.spawner();
+        let queue = JoinQueue::new(0);
+        let spawner = queue.spawner();
 
-        let h = executor.spawn(|_| Box::pin(async { panic!() }));
+        let h = queue.spawn(|_| Box::pin(async { panic!() }));
         let err = h.await.unwrap_err();
         assert!(err.is_panic());
         assert!(err.is_task_panic());
         assert!(!err.is_prev_task_panic());
 
-        executor.cancel();
+        queue.cancel();
         let h = spawner.spawn(|_| Box::pin(async {}));
         let err = h.await.unwrap_err();
         assert!(!err.is_panic());
@@ -295,10 +295,10 @@ mod tests {
 
     #[tokio::test]
     async fn test8() {
-        let executor = Executor::new(0);
-        let spawner = executor.spawner();
+        let queue = JoinQueue::new(0);
+        let spawner = queue.spawner();
 
-        let h = executor.spawn(|_| Box::pin(async { panic!() }));
+        let h = queue.spawn(|_| Box::pin(async { panic!() }));
         let err = h.await.unwrap_err();
         assert!(err.is_panic());
         assert!(err.is_task_panic());
@@ -313,49 +313,49 @@ mod tests {
             assert!(err.is_task_spawner_unavailable());
         });
 
-        assert!(executor.cancel_and_try_join().await.is_err());
+        assert!(queue.cancel_and_try_join().await.is_err());
     }
 
     #[tokio::test]
     async fn test9() {
-        let executor = Executor::new(0);
-        let _spawner = executor.spawner();
-        assert!(executor.cancel_and_try_join().await.is_ok());
+        let queue = JoinQueue::new(0);
+        let _spawner = queue.spawner();
+        assert!(queue.cancel_and_try_join().await.is_ok());
     }
 
     #[tokio::test]
     async fn test10() {
-        let executor = Executor::new(0);
-        let _spawner = executor.spawner();
-        executor.close_spawners();
-        assert!(executor.try_join().await.is_ok());
+        let queue = JoinQueue::new(0);
+        let _spawner = queue.spawner();
+        queue.close_spawners();
+        assert!(queue.try_join().await.is_ok());
     }
 
     #[tokio::test]
     async fn test11() {
-        let executor = Executor::new(0);
-        let spawner = executor.spawner();
-        drop(executor);
+        let queue = JoinQueue::new(0);
+        let spawner = queue.spawner();
+        drop(queue);
         let h = spawner.spawn(|_| Box::pin(async {}));
         assert!(h.await.unwrap_err().is_task_spawner_unavailable());
     }
 
     #[tokio::test]
     async fn test12() {
-        let executor = Executor::new(0);
+        let queue = JoinQueue::new(0);
         
-        let spawner = executor.spawner();
+        let spawner = queue.spawner();
 
         assert!(!spawner.has_panicked().unwrap());
         assert!(!spawner.is_unavailable());
-        executor.spawn(|_| Box::pin(async { panic!() }));
+        queue.spawn(|_| Box::pin(async { panic!() }));
 
         let h = spawner.spawn(|_| Box::pin(async {}));
         assert!(h.await.unwrap_err().is_prev_task_panic());
 
         assert!(!spawner.is_unavailable());
         assert!(spawner.has_panicked().unwrap());
-        executor.close_spawners();
+        queue.close_spawners();
         assert!(spawner.is_unavailable());
         assert!(spawner.has_panicked().is_none());
 
@@ -365,20 +365,20 @@ mod tests {
 
     #[tokio::test]
     async fn test13() {
-        let executor = Executor::new(0);
+        let queue = JoinQueue::new(0);
         
-        let spawner = executor.spawner();
+        let spawner = queue.spawner();
 
         assert!(!spawner.has_panicked().unwrap());
         assert!(!spawner.is_unavailable());
-        executor.spawn(|_| Box::pin(async { panic!() }));
+        queue.spawn(|_| Box::pin(async { panic!() }));
 
         let h = spawner.spawn(|_| Box::pin(async {}));
         assert!(h.await.unwrap_err().is_prev_task_panic());
 
         assert!(!spawner.is_unavailable());
         assert!(spawner.has_panicked().unwrap());
-        drop(executor);
+        drop(queue);
         assert!(spawner.is_unavailable());
         assert!(spawner.has_panicked().is_none());
 
@@ -388,20 +388,20 @@ mod tests {
 
     #[tokio::test]
     async fn test14() {
-        let executor = Executor::new(0);
+        let queue = JoinQueue::new(0);
         
-        let spawner = executor.spawner();
+        let spawner = queue.spawner();
 
         assert!(!spawner.has_panicked().unwrap());
         assert!(!spawner.is_unavailable());
-        executor.spawn(|_| Box::pin(async { panic!() }));
+        queue.spawn(|_| Box::pin(async { panic!() }));
 
         let h = spawner.spawn(|_| Box::pin(async {}));
         assert!(h.await.unwrap_err().is_prev_task_panic());
 
         assert!(!spawner.is_unavailable());
         assert!(spawner.has_panicked().unwrap());
-        executor.cancel();
+        queue.cancel();
         assert!(spawner.is_unavailable());
         assert!(spawner.has_panicked().is_none());
 
@@ -411,20 +411,20 @@ mod tests {
 
     #[tokio::test]
     async fn test15() {
-        let executor = Executor::new(0);
+        let queue = JoinQueue::new(0);
         
-        let spawner = executor.spawner();
+        let spawner = queue.spawner();
 
         assert!(!spawner.has_panicked().unwrap());
         assert!(!spawner.is_unavailable());
-        executor.spawn(|_| Box::pin(async { panic!() }));
+        queue.spawn(|_| Box::pin(async { panic!() }));
 
         let h = spawner.spawn(|_| Box::pin(async {}));
         assert!(h.await.unwrap_err().is_prev_task_panic());
 
         assert!(!spawner.is_unavailable());
         assert!(spawner.has_panicked().unwrap());
-        assert!(executor.cancel_and_try_join().await.is_err());
+        assert!(queue.cancel_and_try_join().await.is_err());
         assert!(spawner.is_unavailable());
         assert!(spawner.has_panicked().is_none());
 
@@ -434,10 +434,10 @@ mod tests {
 
     #[tokio::test]
     async fn test16() {
-        let executor = Executor::new(0);
+        let queue = JoinQueue::new(0);
         
         for _ in 0..1000 {
-            let spawner = executor.spawner();
+            let spawner = queue.spawner();
             spawn(async move {
                 for _ in 0..1000 {
                     spawner.spawn(|s| Box::pin(async {
@@ -447,7 +447,7 @@ mod tests {
             });
         }
     
-        let result = executor.join().await;
+        let result = queue.join().await;
         assert_eq!(result, 1000 * 1000);
     }
 }
@@ -460,8 +460,8 @@ mod asserts {
 
     #[allow(unused)]
     fn assert_impls() {
-        let executor = Executor::new(());
-        let spawner = executor.spawner();
+        let queue = JoinQueue::new(());
+        let spawner = queue.spawner();
         require_send_sync_static(spawner.spawn(|_| Box::pin(async {})));
         require_send_sync_static(spawner.spawn_blocking(|_| {}));
         require_send_sync_static(spawner);

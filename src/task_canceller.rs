@@ -1,13 +1,13 @@
 use std::{panic::{RefUnwindSafe, UnwindSafe}, sync::Arc};
 
 
-/// Handle for canceling a task.
+/// A handle for canceling a task.
 ///
-/// It can be obtained from [TaskHandle::canceller]
+/// This TaskCanceller can be obtained from [TaskHandle::canceller]
 /// and provides the same cancellation operation as [TaskHandle::cancel]
 /// without retaining the task's result or its [TaskHandle].
 ///
-/// It can be cloned cheaply.
+/// The TaskCanceller can be cloned cheaply.
 /// 
 /// [TaskHandle]: crate::TaskHandle
 /// [TaskHandle::cancel]: crate::TaskHandle::cancel
@@ -64,8 +64,8 @@ mod tests {
 
     #[allow(unused)]
     fn assert_cannceller_impl_refunwindsafe_unwindsafe() {
-        let executor = Executor::new(());
-        let task_handle = executor.spawn(|_| Box::pin(async {}));
+        let queue = JoinQueue::new(());
+        let task_handle = queue.spawn(|_| Box::pin(async {}));
         let task_canceller = task_handle.canceller();
         require_refunwindsafe_unwindsafe(task_canceller);
     }

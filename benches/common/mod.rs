@@ -1,6 +1,6 @@
 #![allow(unused)]
 
-use async_sequential::Executor;
+use async_sequential::JoinQueue;
 use criterion::Criterion;
 use tokio::runtime::Runtime;
 use std::hint::black_box;
@@ -32,7 +32,7 @@ pub fn async_task_with_sequential_executor(c: &mut Criterion, runtime: Runtime, 
         group.bench_function(task_count.to_string(), |b| {
             b.iter(|| {
                 runtime.block_on(async {
-                    let executor = Executor::new(0);
+                    let executor = JoinQueue::new(0);
 
                     for _ in 0..task_count {
                         executor.spawn(|state| Box::pin(async {
@@ -93,7 +93,7 @@ pub fn blocking_task_with_sequential_executor(c: &mut Criterion, runtime: Runtim
         group.bench_function(task_count.to_string(), |b| {
             b.iter(|| {
                 runtime.block_on(async {
-                    let executor = Executor::new(0);
+                    let executor = JoinQueue::new(0);
 
                     for _ in 0..task_count {
                         executor.spawn_blocking(|state| {

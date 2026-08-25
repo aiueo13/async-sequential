@@ -1,18 +1,17 @@
 mod internal;
-mod executor_join_error;
-mod executor;
+mod join_queue;
+mod queue_join_error;
 mod task_canceller;
 mod task_error;
 mod task_handle;
 mod task_spawner;
 
-pub use executor_join_error::ExecutorJoinError;
-pub use executor::Executor;
+pub use join_queue::JoinQueue;
+pub use queue_join_error::StatefulQueueJoinError;
 pub use task_spawner::TaskSpawner;
 pub use task_canceller::TaskCanceller;
 pub use task_error::TaskError;
 pub use task_handle::TaskHandle;
-
 
 #[cfg(test)]
 mod test_readme {
@@ -22,14 +21,16 @@ mod test_readme {
 
     #[tokio::test]
     async fn test() {
-        let executor = async_sequential::Executor::new(Vec::new());
+        let queue = async_sequential::JoinQueue::new(Vec::new());
 
-        executor.spawn(move |state: &mut Vec<u64>| Box::pin(async move {
+        // Tasks are executed in the order in which they are spawned.
+        queue.spawn(move |state: &mut Vec<u64>| Box::pin(async move {
             sleep(Duration::from_secs(1)).await;
             state.push(1);
         }));
 
-        let spawner = executor.spawner();
+        // A spawner can be used to spawn tasks from another thread or asynchronous task.
+        let spawner = queue.spawner();
         tokio::spawn(async move {
             let task_handle1 = spawner.spawn_blocking(move |state| {
                 thread::sleep(Duration::from_secs(2));
@@ -44,11 +45,13 @@ mod test_readme {
 
             assert_eq!(task_handle1.await.unwrap(), "hello");
             assert_eq!(task_handle2.await.unwrap(), "world");
+
+            drop(spawner);
         });
 
         // Wait for all tasks to complete.
-        // NOTE: This does not complete as long as `spawner` has not been dropped.
-        let result = executor.join().await;
+        // NOTE: This does not complete as long as any spawner remains alive.
+        let result = queue.join().await;
         assert_eq!(result, vec![1, 2, 3]);
     }
 }
@@ -62,10 +65,10 @@ mod tests3 {
 
     #[tokio::test]
     async fn test_completed() {
-        let executor = Executor::new(());
+        let queue = JoinQueue::new(());
         let (tx, rx) = oneshot::channel();
 
-        let handle = executor.spawn(|_| Box::pin(async {
+        let handle = queue.spawn(|_| Box::pin(async {
             rx.await.unwrap();
             42
         }));
@@ -76,26 +79,26 @@ mod tests3 {
 
     #[tokio::test]
     async fn test_finished_after_completion() {
-        let executor = Executor::new(());
+        let queue = JoinQueue::new(());
 
-        let handle = executor.spawn(|_| Box::pin(async {
+        let handle = queue.spawn(|_| Box::pin(async {
             42
         }));
 
-        executor.join().await;
+        queue.join().await;
         assert_eq!(handle.await.unwrap(), 42);
     }
 
 
     #[tokio::test]
     async fn test_cancel_queued_task() {
-        let executor = Executor::new(());
+        let queue = JoinQueue::new(());
         let (tx, rx) = oneshot::channel();
 
-        let running = executor.spawn(|_| Box::pin(async {
+        let running = queue.spawn(|_| Box::pin(async {
             rx.await.unwrap();
         }));
-        let handle = executor.spawn(|_| Box::pin(async {
+        let handle = queue.spawn(|_| Box::pin(async {
             42
         }));
 
@@ -110,11 +113,11 @@ mod tests3 {
 
     #[tokio::test]
     async fn test_cancel_running_task_returns_false() {
-        let executor = Executor::new(());
+        let queue = JoinQueue::new(());
         let (tx, rx) = oneshot::channel();
         let (tx2, rx2) = oneshot::channel();
 
-        let handle = executor.spawn(|_| Box::pin(async {
+        let handle = queue.spawn(|_| Box::pin(async {
             tx2.send(()).unwrap();
             rx.await.unwrap();
             42
@@ -129,13 +132,13 @@ mod tests3 {
 
     #[tokio::test]
     async fn test_cancel_twice() {
-        let executor = Executor::new(());
+        let queue = JoinQueue::new(());
         let (tx, rx) = oneshot::channel();
 
-        let running = executor.spawn(|_| Box::pin(async {
+        let running = queue.spawn(|_| Box::pin(async {
             rx.await.unwrap();
         }));
-        let handle = executor.spawn(|_| Box::pin(async {
+        let handle = queue.spawn(|_| Box::pin(async {
             42
         }));
 
@@ -149,12 +152,12 @@ mod tests3 {
 
 
     #[tokio::test]
-    async fn test_executor_drop() {
-        let executor = Executor::new(());
+    async fn test_queue_drop() {
+        let queue = JoinQueue::new(());
         let (tx, rx) = oneshot::channel();
         let (tx2, rx2) = oneshot::channel();
 
-        let handle = executor.spawn(|_| Box::pin(async {
+        let handle = queue.spawn(|_| Box::pin(async {
             tx2.send(()).unwrap();
             rx.await.unwrap();
             42
@@ -162,7 +165,7 @@ mod tests3 {
 
         rx2.await.unwrap();
 
-        drop(executor);
+        drop(queue);
 
         assert!(!handle.cancel());
 
@@ -173,9 +176,9 @@ mod tests3 {
 
     #[tokio::test]
     async fn test_task_panic() {
-        let executor = Executor::new(());
+        let queue = JoinQueue::new(());
 
-        let handle = executor.spawn(|_| Box::pin(async {
+        let handle = queue.spawn(|_| Box::pin(async {
             panic!("task panic");
         }));
 
@@ -185,15 +188,15 @@ mod tests3 {
 
     #[tokio::test]
     async fn test_prev_task_panic() {
-        let executor = Executor::new(());
+        let queue = JoinQueue::new(());
 
-        let first = executor.spawn(|_| Box::pin(async {
+        let first = queue.spawn(|_| Box::pin(async {
             panic!("first task panic");
         }));
 
         assert!(first.await.is_err());
 
-        let second = executor.spawn(|_| Box::pin(async {
+        let second = queue.spawn(|_| Box::pin(async {
             42
         }));
 
@@ -204,11 +207,11 @@ mod tests3 {
 
     #[tokio::test]
     async fn test_is_finished_while_running() {
-        let executor = Executor::new(());
+        let queue = JoinQueue::new(());
         let (tx, rx) = oneshot::channel();
         let (tx2, rx2) = oneshot::channel();
 
-        let handle = executor.spawn(|_| Box::pin(async {
+        let handle = queue.spawn(|_| Box::pin(async {
             tx2.send(()).unwrap();
             rx.await.unwrap();
         }));
@@ -222,17 +225,17 @@ mod tests3 {
     async fn test_cancel_queued_task_does_not_run() {
         use std::sync::atomic::{AtomicBool, Ordering};
 
-        let executor = Executor::new(());
+        let queue = JoinQueue::new(());
         let (tx, rx) = oneshot::channel();
 
-        let running = executor.spawn(|_| Box::pin(async {
+        let running = queue.spawn(|_| Box::pin(async {
             rx.await.unwrap();
         }));
 
         let executed = Arc::new(AtomicBool::new(false));
         let executed_clone = executed.clone();
 
-        let handle = executor.spawn(move |_| Box::pin(async move {
+        let handle = queue.spawn(move |_| Box::pin(async move {
             executed_clone.store(true, Ordering::SeqCst);
         }));
 
@@ -246,32 +249,32 @@ mod tests3 {
     }
 
     #[tokio::test]
-    async fn test_panic_before_executor_drop() {
-        let executor = Executor::new(());
+    async fn test_panic_before_queue_drop() {
+        let queue = JoinQueue::new(());
 
-        let handle = executor.spawn(|_| Box::pin(async {
+        let handle = queue.spawn(|_| Box::pin(async {
             panic!()
         }));
 
-        let _ = executor.spawn(|_| Box::pin(async {})).await;
+        let _ = queue.spawn(|_| Box::pin(async {})).await;
 
-        drop(executor);
+        drop(queue);
         let err = handle.await.unwrap_err();
         assert!(err.is_panic());
         assert!(!err.is_cancelled());
     }
 
     #[tokio::test]
-    async fn test_panic_after_executor_drop() {
-        let executor = Executor::new(());
+    async fn test_panic_after_queue_drop() {
+        let queue = JoinQueue::new(());
         let (tx, rx) = oneshot::channel();
 
-        let handle = executor.spawn(|_| Box::pin(async {
+        let handle = queue.spawn(|_| Box::pin(async {
             rx.await.unwrap();
             panic!()
         }));
 
-        drop(executor);
+        drop(queue);
         tx.send(()).unwrap();
         let err = handle.await.unwrap_err();
         assert!(!err.is_panic());
@@ -280,15 +283,15 @@ mod tests3 {
 
     #[tokio::test]
     async fn test_resolve_task_handle_after_cancel() {
-        let executor = Executor::new(());
+        let queue = JoinQueue::new(());
         let (tx, rx) = oneshot::channel();
     
-        executor.spawn(move |_| Box::pin(async {
+        queue.spawn(move |_| Box::pin(async {
             tx.send(()).unwrap();
             pending::<()>().await;
         }));
 
-        let handle = executor.spawn(move |_| Box::pin(async {}));
+        let handle = queue.spawn(move |_| Box::pin(async {}));
 
         rx.await.unwrap();
         handle.cancel();
@@ -298,18 +301,18 @@ mod tests3 {
     }
 
     #[tokio::test]
-    async fn test_resolve_task_handle_after_executor_aborted() {
-        let executor = Executor::new(());
+    async fn test_resolve_task_handle_after_queue_aborted() {
+        let queue = JoinQueue::new(());
         let (tx, rx) = oneshot::channel();
 
-        let handle1 = executor.spawn(move |_| Box::pin(async {
+        let handle1 = queue.spawn(move |_| Box::pin(async {
             tx.send(()).unwrap();
             pending::<()>().await;
         }));
-        let handle2 = executor.spawn(move |_| Box::pin(async {}));
+        let handle2 = queue.spawn(move |_| Box::pin(async {}));
 
         rx.await.unwrap();
-        drop(executor);
+        drop(queue);
 
         let err1 = handle1.await.unwrap_err();
         assert!(err1.is_cancelled());
@@ -320,26 +323,26 @@ mod tests3 {
     }
 
     #[tokio::test]
-    async fn test_resolve_task_handle_after_executor_canncelled() {
-        let executor = Executor::new(Vec::new());
+    async fn test_resolve_task_handle_after_queue_canncelled() {
+        let queue = JoinQueue::new(Vec::new());
         let (tx, rx) = oneshot::channel();
         let (tx2, mut rx2) = mpsc::unbounded_channel();
 
-        let handle1 = executor.spawn(move |state| Box::pin(async move {
+        let handle1 = queue.spawn(move |state| Box::pin(async move {
             tx.send(()).unwrap();
             while let Some(v) = rx2.recv().await {
                 state.push(v);
             }
             state.clone()
         }));
-        let handle2 = executor.spawn(move |_| Box::pin(async {
+        let handle2 = queue.spawn(move |_| Box::pin(async {
             pending::<()>().await;
         }));
 
         tx2.send(0).unwrap();
         rx.await.unwrap();
         
-        executor.cancel();
+        queue.cancel();
 
         let err2 = handle2.await.unwrap_err();
         assert!(err2.is_cancelled());
@@ -353,28 +356,28 @@ mod tests3 {
 
     #[tokio::test]
     async fn test_cancel_join() {
-        let executor = Executor::new(());
+        let queue = JoinQueue::new(());
         let (tx, rx) = oneshot::channel();
 
-        let running = executor.spawn(move |_| Box::pin(async move {
+        let running = queue.spawn(move |_| Box::pin(async move {
             tx.send(()).unwrap();
             sleep(Duration::from_millis(500)).await;
             "complete"
         }));
 
-        let pending = executor.spawn(move |_| Box::pin(async move { }));
+        let pending = queue.spawn(move |_| Box::pin(async move { }));
 
         rx.await.unwrap();
-        executor.cancel_and_join().await;
+        queue.cancel_and_join().await;
         assert_eq!(running.await.unwrap(), "complete");
         assert!(pending.await.unwrap_err().is_cancelled());
     }
 
     #[tokio::test]
     async fn test_task_panic_err_state() {
-        let executor = Executor::new(());
+        let queue = JoinQueue::new(());
 
-        let handle = executor.spawn(move |_| Box::pin(async move {
+        let handle = queue.spawn(move |_| Box::pin(async move {
             panic!();
         }));
         let err = handle.await.unwrap_err();
@@ -383,7 +386,7 @@ mod tests3 {
         assert!(!err.is_prev_task_panic());
         assert!(!err.is_cancelled());
 
-        let handle = executor.spawn(move |_| Box::pin(async move {}));
+        let handle = queue.spawn(move |_| Box::pin(async move {}));
         let err = handle.await.unwrap_err();
         assert!(err.is_panic());
         assert!(err.is_prev_task_panic());
@@ -393,106 +396,106 @@ mod tests3 {
 
     #[tokio::test]
     async fn test_task_handle_cancel_err_state() {
-        let executor = Executor::new(());
+        let queue = JoinQueue::new(());
         let (tx, rx) = oneshot::channel();
-        let _ = executor.spawn(|_| Box::pin(async {
+        let _ = queue.spawn(|_| Box::pin(async {
             tx.send(()).unwrap();
             pending::<()>().await;
         }));
-        let pending = executor.spawn(|_| Box::pin(async {
+        let pending = queue.spawn(|_| Box::pin(async {
 
         }));
         rx.await.unwrap();
 
         pending.cancel();
-        drop(executor);
+        drop(queue);
 
         let err = pending.await.unwrap_err();
         assert!(err.is_cancelled());
         assert!(err.is_task_cancelled());
-        assert!(!err.is_executor_aborted());
-        assert!(!err.is_executor_cancelled());
+        assert!(!err.is_queue_aborted());
+        assert!(!err.is_queue_cancelled());
     }
 
     #[tokio::test]
     async fn test_task_canceller_cancel_err_state() {
-        let executor = Executor::new(());
+        let queue = JoinQueue::new(());
         let (tx, rx) = oneshot::channel();
-        let _ = executor.spawn(|_| Box::pin(async {
+        let _ = queue.spawn(|_| Box::pin(async {
             tx.send(()).unwrap();
             pending::<()>().await;
         }));
-        let pending = executor.spawn(|_| Box::pin(async {
+        let pending = queue.spawn(|_| Box::pin(async {
 
         }));
         rx.await.unwrap();
 
         pending.canceller().cancel();
-        drop(executor);
+        drop(queue);
 
         let err = pending.await.unwrap_err();
         assert!(err.is_cancelled());
         assert!(err.is_task_cancelled());
-        assert!(!err.is_executor_aborted());
-        assert!(!err.is_executor_cancelled());
+        assert!(!err.is_queue_aborted());
+        assert!(!err.is_queue_cancelled());
     }
 
     #[tokio::test]
     async fn test_worker_abort_err_state() {
-        let executor = Executor::new(());
+        let queue = JoinQueue::new(());
         let (tx, rx) = oneshot::channel();
-        let _ = executor.spawn(|_| Box::pin(async {
+        let _ = queue.spawn(|_| Box::pin(async {
             tx.send(()).unwrap();
             pending::<()>().await;
         }));
-        let pending = executor.spawn(|_| Box::pin(async {
+        let pending = queue.spawn(|_| Box::pin(async {
 
         }));
         rx.await.unwrap();
 
-        drop(executor);
+        drop(queue);
         let err = pending.await.unwrap_err();
         assert!(err.is_cancelled());
         assert!(!err.is_task_cancelled());
-        assert!(err.is_executor_aborted());
-        assert!(!err.is_executor_cancelled());
+        assert!(err.is_queue_aborted());
+        assert!(!err.is_queue_cancelled());
     }
 
     #[tokio::test]
     async fn test_worker_cancel_err_state() {
-        let executor = Executor::new(());
+        let queue = JoinQueue::new(());
         let (tx, rx) = oneshot::channel();
-        let _ = executor.spawn(|_| Box::pin(async {
+        let _ = queue.spawn(|_| Box::pin(async {
             tx.send(()).unwrap();
             pending::<()>().await;
         }));
-        let pending = executor.spawn(|_| Box::pin(async {
+        let pending = queue.spawn(|_| Box::pin(async {
 
         }));
         rx.await.unwrap();
 
-        executor.cancel();
+        queue.cancel();
         let err = pending.await.unwrap_err();
         assert!(err.is_cancelled());
         assert!(!err.is_task_cancelled());
-        assert!(!err.is_executor_aborted());
-        assert!(err.is_executor_cancelled());
+        assert!(!err.is_queue_aborted());
+        assert!(err.is_queue_cancelled());
     }
 
     #[tokio::test]
     async fn test_panic_err_state_after_worker_cancel() {
-        let executor = Executor::new(());
+        let queue = JoinQueue::new(());
         let (tx, rx) = oneshot::channel();
-        let _ = executor.spawn(|_| Box::pin(async {
+        let _ = queue.spawn(|_| Box::pin(async {
             tx.send(()).unwrap();
             panic!()
         }));
-        let pending = executor.spawn(|_| Box::pin(async {
+        let pending = queue.spawn(|_| Box::pin(async {
 
         }));
         rx.await.unwrap();
 
-        executor.cancel();
+        queue.cancel();
         let err = pending.await.unwrap_err();
         assert!(err.is_panic());
         assert!(!err.is_task_panic());
@@ -502,67 +505,67 @@ mod tests3 {
 
     #[tokio::test]
     async fn test_execute() {
-        let executor = Executor::new(0);
+        let queue = JoinQueue::new(0);
 
         for _ in 0..10000 {
-            executor.execute(|s| Box::pin(async {
+            queue.execute(|s| Box::pin(async {
                 *s += 1;
             })).await;
 
-            executor.execute_blocking(|s| {
+            queue.execute_blocking(|s| {
                 *s += 1;
             }).await;
         }
         
-        assert_eq!(executor.join().await, 20000);
+        assert_eq!(queue.join().await, 20000);
     }
 
     #[tokio::test]
     #[should_panic]
     async fn test_execute_panicked() {
-        let executor = Executor::new(());
-        executor.execute(|_| Box::pin(async { panic!() })).await;
+        let queue = JoinQueue::new(());
+        queue.execute(|_| Box::pin(async { panic!() })).await;
     }
 
     #[tokio::test]
     #[should_panic]
     async fn test_execute_blocking_panicked() {
-        let executor = Executor::new(());
-        executor.execute_blocking(|_| { panic!() }).await;
+        let queue = JoinQueue::new(());
+        queue.execute_blocking(|_| { panic!() }).await;
     }
 
     #[tokio::test]
     #[should_panic]
     async fn test_execute_panicked_after_panic() {
-        let executor = Executor::new(());
-        let h = executor.spawn(|_| Box::pin(async { panic!()}));
+        let queue = JoinQueue::new(());
+        let h = queue.spawn(|_| Box::pin(async { panic!()}));
         assert!(h.await.unwrap_err().is_task_panic());
-        executor.execute(|_| Box::pin(async { })).await;
+        queue.execute(|_| Box::pin(async { })).await;
     }
 
     #[tokio::test]
     #[should_panic]
     async fn test_execute_blocking_panicked_after_panic() {
-        let executor = Executor::new(());
-        let h = executor.spawn_blocking(|_| {});
+        let queue = JoinQueue::new(());
+        let h = queue.spawn_blocking(|_| {});
         assert!(h.await.unwrap_err().is_task_panic());
-        executor.execute_blocking(|_| {}).await;
+        queue.execute_blocking(|_| {}).await;
     }
 
     #[tokio::test]
     async fn test_executer_panicked() {
-        let executor = Executor::new(());
-        let h = executor.spawn_blocking(|_| { panic!() }); 
+        let queue = JoinQueue::new(());
+        let h = queue.spawn_blocking(|_| { panic!() }); 
         let r = h.await;
-        assert!(executor.has_panicked());
+        assert!(queue.has_panicked());
         assert!(r.unwrap_err().is_task_panic());
 
-        let executor = Executor::new(());
-        let s = executor.spawner();
+        let queue = JoinQueue::new(());
+        let s = queue.spawner();
         let h = s.spawn_blocking(|_| { panic!() }); 
         let r = h.await;
         assert!(s.has_panicked().unwrap());
-        assert!(executor.has_panicked());
+        assert!(queue.has_panicked());
         assert!(r.unwrap_err().is_task_panic());
     }
 }
@@ -575,13 +578,13 @@ mod tests2 {
 
     #[tokio::test]
     async fn test() {
-        let executor = Executor::new(Vec::new());
+        let queue = JoinQueue::new(Vec::new());
 
-        executor.spawn(move |state| Box::pin(async move {
+        queue.spawn(move |state| Box::pin(async move {
             state.push(identity("1").await);
         }));
 
-        let spawner = executor.spawner();
+        let spawner = queue.spawner();
         tokio::spawn(async move {
             spawner.spawn_blocking(move |state| {
                 state.push("2");
@@ -596,7 +599,7 @@ mod tests2 {
 
         // Wait for all tasks to complete.
         // NOTE: This does not complete as long as `spawner` has not been dropped.
-        let result = executor.join().await;
+        let result = queue.join().await;
         assert_eq!(result, vec!["1", "2", "3"]);
 
         async fn identity<T>(v: T) -> T { v }
@@ -604,29 +607,29 @@ mod tests2 {
 
     #[tokio::test]
     async fn test0() {
-        let executor = Executor::new(Vec::new());
+        let queue = JoinQueue::new(Vec::new());
 
-        executor.spawn(move |state: &mut Vec<u64>| Box::pin(async move {
+        queue.spawn(move |state: &mut Vec<u64>| Box::pin(async move {
             state.push(identity(0).await);
         }));
 
-        executor.spawn_blocking(move |state| {
+        queue.spawn_blocking(move |state| {
             state.push(1);
         });
 
-        let task_result = executor.spawn(move |state| Box::pin(async move {
+        let task_result = queue.spawn(move |state| Box::pin(async move {
             state.push(identity(2).await);
             "hello"
         })).await.unwrap();
         assert_eq!(task_result, "hello");
 
-        let task_result = executor.spawn_blocking(move |state| {
+        let task_result = queue.spawn_blocking(move |state| {
             state.push(3);
             "world"
         }).await.unwrap();
         assert_eq!(task_result, "world");
 
-        let result = executor.join().await;
+        let result = queue.join().await;
         assert_eq!(result, vec![0, 1, 2, 3]);
 
         async fn identity(v: u64) -> u64 {
@@ -636,29 +639,29 @@ mod tests2 {
 
     #[tokio::test]
     async fn test1() {
-        let executor = Executor::new(Vec::new());
+        let queue = JoinQueue::new(Vec::new());
         let c = 1000;
 
         for i in 0..c {
             if i % 2 == 0 {
-                executor.spawn(move |state| Box::pin(async move { state.push(i); }));
+                queue.spawn(move |state| Box::pin(async move { state.push(i); }));
             }
             else {
-                executor.spawn_blocking(move |state| { state.push(i); });
+                queue.spawn_blocking(move |state| { state.push(i); });
             }
         }
 
-        assert_eq!(executor.join().await, (0..c).collect::<Vec<_>>());
+        assert_eq!(queue.join().await, (0..c).collect::<Vec<_>>());
     }
 
     #[tokio::test]
     async fn test2() {
-        let executor = Executor::new(Vec::new());
+        let queue = JoinQueue::new(Vec::new());
         let c = 1000;
 
         for i in 0..c {
             if i % 2 == 0 {
-                let r = executor.spawn(move |state| Box::pin(async move { 
+                let r = queue.spawn(move |state| Box::pin(async move { 
                     state.push(i); 
                     i
                 })).await;
@@ -666,7 +669,7 @@ mod tests2 {
                 assert_eq!(r.unwrap(), i);
             }
             else {
-                let r = executor.spawn_blocking(move |state| { 
+                let r = queue.spawn_blocking(move |state| { 
                     state.push(i); 
                     i
                 }).await;
@@ -675,43 +678,43 @@ mod tests2 {
             }
         }
 
-        assert_eq!(executor.join().await, (0..c).collect::<Vec<_>>());
+        assert_eq!(queue.join().await, (0..c).collect::<Vec<_>>());
     }
 
     #[tokio::test]
     async fn test3() {
-        let executor = Executor::new(Vec::new());
+        let queue = JoinQueue::new(Vec::new());
         let c = 1000;
 
         for i in 0..c {
             if i % 2 == 0 {
-                executor.spawn(move |state| Box::pin(async move { state.push(i); })).await.unwrap();
+                queue.spawn(move |state| Box::pin(async move { state.push(i); })).await.unwrap();
             }
             else {
-                executor.spawn_blocking(move |state| { state.push(i); }).await.unwrap();
+                queue.spawn_blocking(move |state| { state.push(i); }).await.unwrap();
             }
         }
 
-        assert_eq!(executor.join().await, (0..c).collect::<Vec<_>>());
+        assert_eq!(queue.join().await, (0..c).collect::<Vec<_>>());
     }
 
     #[tokio::test]
     async fn test4() {
-        let executor = Executor::new(vec![0]);
-        assert_eq!(executor.join().await, vec![0]);
+        let queue = JoinQueue::new(vec![0]);
+        assert_eq!(queue.join().await, vec![0]);
     }
 
     #[tokio::test]
     async fn test5() {
-        let executor = Executor::new(vec![0]);
-        assert_eq!(executor.try_join().await.unwrap(), vec![0]);
+        let queue = JoinQueue::new(vec![0]);
+        assert_eq!(queue.try_join().await.unwrap(), vec![0]);
     }
 
     #[tokio::test]
     async fn test6() {
-        let executor = Executor::new(vec![0]);
-        executor.spawn(|_| Box::pin(async { panic!() }));
-        let r = executor.try_join().await;
+        let queue = JoinQueue::new(vec![0]);
+        queue.spawn(|_| Box::pin(async { panic!() }));
+        let r = queue.try_join().await;
         assert!(r.as_ref().is_err());
         assert!(r.as_ref().is_err());
     }
@@ -719,14 +722,14 @@ mod tests2 {
     #[tokio::test]
     async fn test7() {
         {
-            let executor = Executor::new(());
+            let queue = JoinQueue::new(());
         
             let (tx, rx) = oneshot::channel();
-            let handle = executor.spawn(move |_| Box::pin(async {
+            let handle = queue.spawn(move |_| Box::pin(async {
                 rx.await.unwrap();
             }));
 
-            drop(executor);
+            drop(queue);
             tx.send(()).unwrap();
 
             let r = handle.await;
@@ -734,14 +737,14 @@ mod tests2 {
             assert!(r.as_ref().is_err_and(|e| !e.is_panic()));
         }
         {
-            let executor = Executor::new(());
+            let queue = JoinQueue::new(());
         
             let (tx, rx) = oneshot::channel();
-            let handle = executor.spawn_blocking(move |_| {
+            let handle = queue.spawn_blocking(move |_| {
                 rx.blocking_recv().unwrap();
             });
 
-            drop(executor);
+            drop(queue);
             tx.send(()).unwrap();
 
             let r = handle.await;
@@ -753,9 +756,9 @@ mod tests2 {
     #[tokio::test]
     async fn test8() {
         {
-            let executor = Executor::new(());
+            let queue = JoinQueue::new(());
         
-            let handle = executor.spawn(move |_| Box::pin(async {
+            let handle = queue.spawn(move |_| Box::pin(async {
                 panic!()
             }));
 
@@ -765,9 +768,9 @@ mod tests2 {
             assert!(r.as_ref().is_err_and(|e| e.is_task_panic()));
         }
         {
-            let executor = Executor::new(());
+            let queue = JoinQueue::new(());
         
-            let handle = executor.spawn_blocking(move |_| {
+            let handle = queue.spawn_blocking(move |_| {
                 panic!("this is a panic message")
             });
 
@@ -782,15 +785,15 @@ mod tests2 {
     #[tokio::test]
     async fn test9() {
         {
-            let executor = Executor::new(());
+            let queue = JoinQueue::new(());
         
             let (tx, rx) = oneshot::channel();
-            let handle = executor.spawn(move |_| Box::pin(async {
+            let handle = queue.spawn(move |_| Box::pin(async {
                 rx.await.unwrap();
                 panic!()
             }));
 
-            drop(executor);
+            drop(queue);
             tx.send(()).unwrap();
 
             let r = handle.await;
@@ -798,15 +801,15 @@ mod tests2 {
             assert!(r.as_ref().is_err_and(|e| !e.is_panic()));
         }
         {
-            let executor = Executor::new(());
+            let queue = JoinQueue::new(());
         
             let (tx, rx) = oneshot::channel();
-            let handle = executor.spawn_blocking(move |_| {
+            let handle = queue.spawn_blocking(move |_| {
                 rx.blocking_recv().unwrap();
                 panic!()
             });
 
-            drop(executor);
+            drop(queue);
             tx.send(()).unwrap();
 
             let r = handle.await;
@@ -818,12 +821,12 @@ mod tests2 {
     #[tokio::test]
     async fn test10() {
         {
-            let executor = Executor::new(());
+            let queue = JoinQueue::new(());
         
-            executor.spawn(move |_| Box::pin(async {
+            queue.spawn(move |_| Box::pin(async {
                 panic!()
             }));
-            let handle = executor.spawn(move |_| Box::pin(async {
+            let handle = queue.spawn(move |_| Box::pin(async {
                 
             }));
 
@@ -832,12 +835,12 @@ mod tests2 {
             assert!(r.as_ref().is_err_and(|e| e.is_panic()));
         }
         {
-            let executor = Executor::new(());
+            let queue = JoinQueue::new(());
         
-            executor.spawn_blocking(move |_| {
+            queue.spawn_blocking(move |_| {
                 panic!()
             });
-            let handle = executor.spawn_blocking(move |_| {
+            let handle = queue.spawn_blocking(move |_| {
                 
             });
 
@@ -855,7 +858,7 @@ mod tests {
 
     #[tokio::test]
     async fn test1() {
-        let se = Executor::new("0".to_string());
+        let se = JoinQueue::new("0".to_string());
 
         se.spawn_blocking(|ctx| {
             if ctx == "0" {
@@ -880,7 +883,7 @@ mod tests {
 
     #[tokio::test]
     async fn test2() {
-        let se = Executor::new(0);
+        let se = JoinQueue::new(0);
 
         #[allow(unused_must_use)] {
         tokio::join!(
@@ -903,7 +906,7 @@ mod tests {
 
     #[tokio::test]
     async fn test3() {
-        let se = Arc::new(Executor::new(0));
+        let se = Arc::new(JoinQueue::new(0));
 
         let mut set = tokio::task::JoinSet::new();
         let i = 10000;
@@ -927,7 +930,7 @@ mod tests {
 
     #[tokio::test]
     async fn test4() {
-        let se = Executor::new(0);
+        let se = JoinQueue::new(0);
         let result = se.join().await;
         assert_eq!(result, 0)
     }
@@ -935,7 +938,7 @@ mod tests {
     #[tokio::test]
     #[should_panic]
     async fn test6() {
-        let se = Executor::new(Vec::<&'static str>::new());
+        let se = JoinQueue::new(Vec::<&'static str>::new());
 
         se.spawn(|_ctx| Box::pin(async {
             panic!()
@@ -945,7 +948,7 @@ mod tests {
     #[tokio::test]
     #[should_panic]
     async fn test7() {
-        let se = Executor::new(Vec::<&'static str>::new());
+        let se = JoinQueue::new(Vec::<&'static str>::new());
 
         se.spawn_blocking(|_ctx| {
             panic!()
@@ -954,7 +957,7 @@ mod tests {
 
     #[tokio::test]
     async fn test8() {
-        let se = Executor::new(Vec::<&'static str>::new());
+        let se = JoinQueue::new(Vec::<&'static str>::new());
 
         // TaskHandle を待機しないと task で panic しても sumit_blocking は panic しない
         se.spawn_blocking(|_ctx| {
@@ -964,7 +967,7 @@ mod tests {
 
     #[tokio::test]
     async fn test9() {
-        let se = Executor::new(Vec::<&'static str>::new());
+        let se = JoinQueue::new(Vec::<&'static str>::new());
 
         // TaskHandle を待機しないと task で panic しても sumit は panic しない
         se.spawn(|_ctx| Box::pin(async {
@@ -975,7 +978,7 @@ mod tests {
     #[tokio::test]
     #[should_panic]
     async fn test10() {
-        let se = Executor::new(Vec::<&'static str>::new());
+        let se = JoinQueue::new(Vec::<&'static str>::new());
 
         se.spawn_blocking(|_ctx| {
             panic!()
@@ -985,7 +988,7 @@ mod tests {
     #[tokio::test]
     #[should_panic]
     async fn test11() {
-        let se = Executor::new(Vec::<&'static str>::new());
+        let se = JoinQueue::new(Vec::<&'static str>::new());
 
         se.spawn(|_ctx| Box::pin(async {
             panic!()
@@ -995,7 +998,7 @@ mod tests {
     #[tokio::test]
     #[should_panic]
     async fn test12() {
-        let se = Executor::new(Vec::<&'static str>::new());
+        let se = JoinQueue::new(Vec::<&'static str>::new());
 
         // task が panic　した場合、その後の task も panic　になる。
 
@@ -1009,7 +1012,7 @@ mod tests {
     #[tokio::test]
     #[should_panic]
     async fn test13() {
-        let se = Executor::new(Vec::<&'static str>::new());
+        let se = JoinQueue::new(Vec::<&'static str>::new());
 
         se.spawn(|_ctx| Box::pin(async {
             panic!()
@@ -1020,7 +1023,7 @@ mod tests {
 
     #[tokio::test]
     async fn test14() {
-        let se = Executor::new(Vec::<u64>::new());
+        let se = JoinQueue::new(Vec::<u64>::new());
         let i = 1000;
 
         for i in 0..i {
@@ -1034,7 +1037,7 @@ mod tests {
 
     #[tokio::test]
     async fn test15() {
-        let se = Executor::new(Vec::<u64>::new());
+        let se = JoinQueue::new(Vec::<u64>::new());
         let s = tokio::sync::Mutex::new(0);
 
         se.spawn(move |ctx| Box::pin(async move {
@@ -1061,7 +1064,7 @@ mod tests {
     #[tokio::test]
     #[should_panic]
     async fn test16() {
-        let se = Executor::new(());
+        let se = JoinQueue::new(());
         let (tx, rx) = tokio::sync::oneshot::channel();
         let handle = se.spawn(|_| Box::pin(async {
             let _ = rx.await;
@@ -1073,39 +1076,39 @@ mod tests {
 
     #[tokio::test]
     async fn test17() {
-        let executor = Executor::new(Vec::<u64>::new());
+        let queue = JoinQueue::new(Vec::<u64>::new());
 
-        let handle = executor.spawn(|state| Box::pin(async move {
+        let handle = queue.spawn(|state| Box::pin(async move {
             state.push(1);
         }));
 
         drop(handle);
 
-        let result = executor.join().await;
+        let result = queue.join().await;
 
         assert_eq!(result, vec![1]);
     }
 
     #[tokio::test]
     async fn test18() {
-        let executor = Executor::new(Vec::<&'static str>::new());
+        let queue = JoinQueue::new(Vec::<&'static str>::new());
 
-        executor.spawn(|state| Box::pin(async move {
+        queue.spawn(|state| Box::pin(async move {
             state.push("async-1");
             tokio::task::yield_now().await;
             state.push("async-2");
         }));
 
-        executor.spawn_blocking(|state| {
+        queue.spawn_blocking(|state| {
             state.push("blocking");
         });
 
-        executor.spawn(|state| Box::pin(async move {
+        queue.spawn(|state| Box::pin(async move {
             state.push("async-3");
         }));
 
         assert_eq!(
-            executor.join().await,
+            queue.join().await,
             vec![
                 "async-1",
                 "async-2",
@@ -1118,18 +1121,18 @@ mod tests {
     #[tokio::test]
     #[should_panic]
     async fn test19() {
-        let executor = Executor::new(());
+        let queue = JoinQueue::new(());
 
         let (started_tx, started_rx) = tokio::sync::oneshot::channel();
 
-        let handle = executor.spawn(move |_| Box::pin(async move {
+        let handle = queue.spawn(move |_| Box::pin(async move {
             let _ = started_tx.send(());
             std::future::pending::<()>().await;
         }));
 
         started_rx.await.unwrap();
 
-        drop(executor);
+        drop(queue);
 
         handle.await.unwrap();
     }
@@ -1137,11 +1140,11 @@ mod tests {
     #[tokio::test]
     #[should_panic]
     async fn test20() {
-        let executor = Executor::new(Vec::<u64>::new());
+        let queue = JoinQueue::new(Vec::<u64>::new());
 
         let (started_tx, started_rx) = tokio::sync::oneshot::channel();
 
-        executor.spawn(move |state| Box::pin(async move {
+        queue.spawn(move |state| Box::pin(async move {
             state.push(1);
             let _ = started_tx.send(());
             std::future::pending::<()>().await;
@@ -1149,33 +1152,33 @@ mod tests {
 
         started_rx.await.unwrap();
 
-        let queued_handle = executor.spawn(|state| Box::pin(async move {
+        let queued_handle = queue.spawn(|state| Box::pin(async move {
             state.push(2);
         }));
 
-        drop(executor);
+        drop(queue);
 
         queued_handle.await.unwrap();
     }
 
     #[tokio::test]
     async fn test21() {
-        let executor = Executor::new(Vec::<u64>::new());
+        let queue = JoinQueue::new(Vec::<u64>::new());
 
         for i in 0..1000 {
-            executor.spawn(move |state| Box::pin(async move {
+            queue.spawn(move |state| Box::pin(async move {
                 state.push(i);
             }));
         }
 
-        let result = executor.join().await;
+        let result = queue.join().await;
 
         assert_eq!(result, (0..1000).collect::<Vec<_>>());
     }
 
     #[tokio::test]
     async fn test22() {
-        let se = Executor::new(0);
+        let se = JoinQueue::new(0);
         let c = 4;
 
         for _ in 0..c {

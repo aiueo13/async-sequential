@@ -2,12 +2,12 @@ use crate::*;
 use std::{fmt, panic};
 
 
-/// Error that occurred while waiting for an executor to complete.
-pub struct ExecutorJoinError {
+/// An error that occurred while waiting for a [JoinQueue] to complete.
+pub struct StatefulQueueJoinError {
     repr: internal::WorkerJoinError
 }
 
-impl ExecutorJoinError {
+impl StatefulQueueJoinError {
 
     pub(crate) fn panic(self) -> ! {
         match self.repr.into_panic_msg() {
@@ -17,23 +17,23 @@ impl ExecutorJoinError {
     }
 }
 
-impl From<internal::WorkerJoinError> for ExecutorJoinError {
+impl From<internal::WorkerJoinError> for StatefulQueueJoinError {
 
     fn from(value: internal::WorkerJoinError) -> Self {
         Self { repr: value }
     }
 }
 
-impl fmt::Debug for ExecutorJoinError {
+impl fmt::Debug for StatefulQueueJoinError {
 
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("ExecutorJoinError")
+        f.debug_struct("QueueJoinError")
             .field("panic_msg", &self.repr.panic_msg())
             .finish()
     }
 }
 
-impl fmt::Display for ExecutorJoinError {
+impl fmt::Display for StatefulQueueJoinError {
 
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self.repr.panic_msg() {
@@ -43,11 +43,11 @@ impl fmt::Display for ExecutorJoinError {
     }
 }
 
-impl std::error::Error for ExecutorJoinError {}
+impl std::error::Error for StatefulQueueJoinError {}
 
-impl From<ExecutorJoinError> for std::io::Error {
+impl From<StatefulQueueJoinError> for std::io::Error {
 
-    fn from(value: ExecutorJoinError) -> std::io::Error {
+    fn from(value: StatefulQueueJoinError) -> std::io::Error {
         std::io::Error::other(value)
     }
 }
