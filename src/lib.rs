@@ -10,7 +10,7 @@ pub use join_queue::JoinQueue;
 pub use queue_join_error::QueueJoinError;
 pub use task_spawner::TaskSpawner;
 pub use task_canceller::TaskCanceller;
-pub use task_error::TaskError;
+pub use task_error::{TaskError, TaskErrorKind};
 pub use task_handle::TaskHandle;
 
 #[cfg(test)]
@@ -382,15 +382,15 @@ mod tests3 {
         }));
         let err = handle.await.unwrap_err();
         assert!(err.is_panic());
-        assert!(err.is_task_panic());
-        assert!(!err.is_prev_task_panic());
+        assert!(err.kind().is_task_panic());
+        assert!(!err.kind().is_previous_task_panic());
         assert!(!err.is_cancelled());
 
         let handle = queue.spawn(move |_| Box::pin(async move {}));
         let err = handle.await.unwrap_err();
         assert!(err.is_panic());
-        assert!(err.is_prev_task_panic());
-        assert!(!err.is_task_panic());
+        assert!(err.kind().is_previous_task_panic());
+        assert!(!err.kind().is_task_panic());
         assert!(!err.is_cancelled());
     }
 
@@ -412,9 +412,9 @@ mod tests3 {
 
         let err = pending.await.unwrap_err();
         assert!(err.is_cancelled());
-        assert!(err.is_task_cancelled());
-        assert!(!err.is_queue_aborted());
-        assert!(!err.is_queue_cancelled());
+        assert!(err.kind().is_task_cancelled());
+        assert!(!err.kind().is_queue_aborted());
+        assert!(!err.kind().is_queue_cancelled());
     }
 
     #[tokio::test]
@@ -435,9 +435,9 @@ mod tests3 {
 
         let err = pending.await.unwrap_err();
         assert!(err.is_cancelled());
-        assert!(err.is_task_cancelled());
-        assert!(!err.is_queue_aborted());
-        assert!(!err.is_queue_cancelled());
+        assert!(err.kind().is_task_cancelled());
+        assert!(!err.kind().is_queue_aborted());
+        assert!(!err.kind().is_queue_cancelled());
     }
 
     #[tokio::test]
@@ -456,9 +456,9 @@ mod tests3 {
         drop(queue);
         let err = pending.await.unwrap_err();
         assert!(err.is_cancelled());
-        assert!(!err.is_task_cancelled());
-        assert!(err.is_queue_aborted());
-        assert!(!err.is_queue_cancelled());
+        assert!(!err.kind().is_task_cancelled());
+        assert!(err.kind().is_queue_aborted());
+        assert!(!err.kind().is_queue_cancelled());
     }
 
     #[tokio::test]
@@ -477,9 +477,9 @@ mod tests3 {
         queue.cancel();
         let err = pending.await.unwrap_err();
         assert!(err.is_cancelled());
-        assert!(!err.is_task_cancelled());
-        assert!(!err.is_queue_aborted());
-        assert!(err.is_queue_cancelled());
+        assert!(!err.kind().is_task_cancelled());
+        assert!(!err.kind().is_queue_aborted());
+        assert!(err.kind().is_queue_cancelled());
     }
 
     #[tokio::test]
@@ -498,8 +498,8 @@ mod tests3 {
         queue.cancel();
         let err = pending.await.unwrap_err();
         assert!(err.is_panic());
-        assert!(!err.is_task_panic());
-        assert!(err.is_prev_task_panic());
+        assert!(!err.kind().is_task_panic());
+        assert!(err.kind().is_previous_task_panic());
         assert!(!err.is_cancelled());
     }
 
@@ -539,7 +539,7 @@ mod tests3 {
     async fn test_execute_panicked_after_panic() {
         let queue = JoinQueue::new(());
         let h = queue.spawn(|_| Box::pin(async { panic!()}));
-        assert!(h.await.unwrap_err().is_task_panic());
+        assert!(h.await.unwrap_err().kind().is_task_panic());
         queue.execute(|_| Box::pin(async { })).await;
     }
 
@@ -548,7 +548,7 @@ mod tests3 {
     async fn test_execute_blocking_panicked_after_panic() {
         let queue = JoinQueue::new(());
         let h = queue.spawn_blocking(|_| {});
-        assert!(h.await.unwrap_err().is_task_panic());
+        assert!(h.await.unwrap_err().kind().is_task_panic());
         queue.execute_blocking(|_| {}).await;
     }
 
@@ -558,7 +558,7 @@ mod tests3 {
         let h = queue.spawn_blocking(|_| { panic!() }); 
         let r = h.await;
         assert!(queue.has_panicked());
-        assert!(r.unwrap_err().is_task_panic());
+        assert!(r.unwrap_err().kind().is_task_panic());
 
         let queue = JoinQueue::new(());
         let s = queue.spawner();
@@ -566,7 +566,7 @@ mod tests3 {
         let r = h.await;
         assert!(s.has_panicked().unwrap());
         assert!(queue.has_panicked());
-        assert!(r.unwrap_err().is_task_panic());
+        assert!(r.unwrap_err().kind().is_task_panic());
     }
 }
 
@@ -765,7 +765,7 @@ mod tests2 {
             let r = handle.await;
             assert!(r.as_ref().is_err_and(|e| !e.is_cancelled()));
             assert!(r.as_ref().is_err_and(|e| e.is_panic()));
-            assert!(r.as_ref().is_err_and(|e| e.is_task_panic()));
+            assert!(r.as_ref().is_err_and(|e| e.kind().is_task_panic()));
         }
         {
             let queue = JoinQueue::new(());
@@ -778,7 +778,7 @@ mod tests2 {
             eprintln!("{}", r.as_ref().unwrap_err());
             assert!(r.as_ref().is_err_and(|e| !e.is_cancelled()));
             assert!(r.as_ref().is_err_and(|e| e.is_panic()));
-            assert!(r.as_ref().is_err_and(|e| e.is_task_panic()));
+            assert!(r.as_ref().is_err_and(|e| e.kind().is_task_panic()));
         }
     }
 

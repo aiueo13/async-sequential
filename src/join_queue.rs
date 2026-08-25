@@ -92,9 +92,9 @@ impl<S> JoinQueue<S> {
     /// Waits for all tasks to complete and returns the final state.
     ///
     /// Note that this method does not complete as long as any [TaskSpawner]
-    /// obtained from [spawner](JoinQueue::spawner) remains alive.
+    /// obtained from [spawner()](JoinQueue::spawner) remains alive.
     /// To allow it to complete, either drop all TaskSpawners
-    /// or call [close_spawners](JoinQueue::close_spawners) beforehand.
+    /// or call [close_spawners()](JoinQueue::close_spawners) beforehand.
     /// 
     /// # Panics
     /// Panics if any task panicked before or during this method,
@@ -106,9 +106,9 @@ impl<S> JoinQueue<S> {
     /// Waits for all tasks to complete and returns the final state.
     ///
     /// Note that this method does not complete as long as any [TaskSpawner]
-    /// obtained from [spawner](JoinQueue::spawner) remains alive.
+    /// obtained from [spawner()](JoinQueue::spawner) remains alive.
     /// To allow it to complete, either drop all TaskSpawners
-    /// or call [close_spawners](JoinQueue::close_spawners) beforehand.
+    /// or call [close_spawners()](JoinQueue::close_spawners) beforehand.
     /// 
     /// # Errors
     /// Returns an error if any task panicked before or during this method.
@@ -202,9 +202,9 @@ impl<S> JoinQueue<S> {
     /// Returns true if a task previously executed by this JoinQueue has panicked.
     /// 
     /// Once a task has panicked,
-    /// [TaskHandle]s obtained from [spawn](Self::spawn) or [spawn_blocking](Self::spawn_blocking)
-    /// immediately return errors for which [TaskError::is_prev_task_panic] returns true
-    /// and [execute](Self::execute) or [execute_blocking](Self::execute_blocking) panic as well.
+    /// [TaskHandle]s obtained from [spawn()](Self::spawn) or [spawn_blocking()](Self::spawn_blocking)
+    /// immediately return errors for which [TaskError::kind()](TaskError::kind) returns [TaskErrorKind::PreviousTaskPanic]
+    /// and [execute()](Self::execute) or [execute_blocking()](Self::execute_blocking) panic as well.
     /// Because the state invariants may have been violated by the task's panic.
     pub fn has_panicked(&self) -> bool {
         let worker = self.worker.lock().unwrap();
@@ -234,16 +234,15 @@ impl<S: Send + 'static> JoinQueue<S> {
 
     /// Returns a [TaskSpawner] for queuing tasks onto this JoinQueue.
     ///
-    /// TaskSpawner provides methods equivalent to [spawn](JoinQueue::spawn) and [spawn_blocking](JoinQueue::spawn_blocking),
+    /// TaskSpawner provides methods equivalent to [spawn()](JoinQueue::spawn) and [spawn_blocking()](JoinQueue::spawn_blocking),
     /// except that the returned [TaskHandle] immediately returns an error
     /// if the TaskSpawner can no longer spawn tasks,
     /// such as when the TaskSpawner has been closed
     /// or the JoinQueue has been aborted or cancelled.
-    /// In such cases, [TaskError::is_task_spawner_unavailable] returns true.
     /// 
-    /// Note that [join](JoinQueue::join) and [try_join](JoinQueue::try_join) does not complete as long as any TaskSpawner remains alive.
+    /// Note that [join()](JoinQueue::join) and [try_join()](JoinQueue::try_join) does not complete as long as any TaskSpawner remains alive.
     /// To allow it to complete, either drop all TaskSpawners
-    /// or call [close_spawners](JoinQueue::close_spawners) beforehand.
+    /// or call [close_spawners()](JoinQueue::close_spawners) beforehand.
     /// 
     /// # Panics
     /// Panics if this method is called outside Tokio runtime.
@@ -352,7 +351,7 @@ impl<S: Send + 'static> JoinQueue<S> {
     /// Tasks are executed sequentially in the order they are queued,
     /// regardless of whether they are asynchronous or blocking.
     /// 
-    /// This is a convenient wrapper around [spawn](JoinQueue::spawn).
+    /// This is a convenient wrapper around [spawn()](JoinQueue::spawn).
     /// 
     /// # Panics
     /// Panics if the task or any previous task panicked,
@@ -396,7 +395,7 @@ impl<S: Send + 'static> JoinQueue<S> {
     /// The blocking task is executed using [Tokio's blocking thread pool](https://docs.rs/tokio/latest/tokio/task/fn.spawn_blocking.html)
     /// to avoid blocking the asynchronous runtime.
     /// 
-    /// This is a convenient wrapper around [spawn_blocking](JoinQueue::spawn_blocking).
+    /// This is a convenient wrapper around [spawn_blocking()](JoinQueue::spawn_blocking).
     /// 
     /// # Panics
     /// Panics if the task or any previous task panicked,

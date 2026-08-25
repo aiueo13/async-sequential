@@ -3,15 +3,15 @@ use std::{panic::{RefUnwindSafe, UnwindSafe}, sync::Arc};
 
 /// A handle for canceling a task.
 ///
-/// This TaskCanceller can be obtained from [TaskHandle::canceller]
-/// and provides the same cancellation operation as [TaskHandle::cancel]
+/// This TaskCanceller can be obtained from [TaskHandle::canceller()]
+/// and provides the same cancellation operation as [TaskHandle::cancel()]
 /// without retaining the task's result or its [TaskHandle].
 ///
 /// The TaskCanceller can be cloned cheaply.
 /// 
 /// [TaskHandle]: crate::TaskHandle
-/// [TaskHandle::cancel]: crate::TaskHandle::cancel
-/// [TaskHandle::canceller]: crate::TaskHandle::canceller
+/// [TaskHandle::cancel()]: crate::TaskHandle::cancel
+/// [TaskHandle::canceller()]: crate::TaskHandle::canceller
 #[derive(Clone)]
 pub struct TaskCanceller {
     repr: Repr
@@ -45,7 +45,7 @@ impl TaskCanceller {
     /// and **does not abort a running task** to preserve the state invariant.
     /// It does nothing if the task has already finished.
     /// 
-    /// This method is equivalent to [TaskHandle::cancel](crate::TaskHandle::cancel).
+    /// This method is equivalent to [TaskHandle::cancel()](crate::TaskHandle::cancel).
     pub fn cancel(&self) -> bool {
         match &self.repr {
             Repr::Noncancellable => false,

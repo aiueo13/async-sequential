@@ -6,16 +6,15 @@ use std::pin::Pin;
 ///
 /// It can be obtained from [JoinQueue::spawner].
 /// 
-/// It provides methods equivalent to [JoinQueue::spawn] and [JoinQueue::spawn_blocking],
+/// It provides methods equivalent to [JoinQueue::spawn()](JoinQueue::spawn) and [JoinQueue::spawn_blocking()](JoinQueue::spawn_blocking),
 /// except that the returned [TaskHandle] immediately returns an error
 /// if this TaskSpawner can no longer spawn tasks,
 /// such as when the TaskSpawner has been closed
-/// or the associated [JoinQueue] has been aborted or cancelled.
-/// In such cases, [TaskError::is_task_spawner_unavailable] returns true.
+/// or the associated JoinQueue has been aborted or cancelled.
 /// 
-/// Note that [JoinQueue::join] and [JoinQueue::try_join] does not complete as long as any TaskSpawner remains alive.
+/// Note that [JoinQueue::join()](JoinQueue::join) and [JoinQueue::try_join()](JoinQueue::try_join) does not complete as long as any TaskSpawner remains alive.
 /// To allow it to complete, either drop all TaskSpawners
-/// or call [JoinQueue::close_spawners] beforehand.
+/// or call [JoinQueue::close_spawners()](JoinQueue::close_spawners) beforehand.
 pub struct TaskSpawner<S> {
     sender: internal::WorkerTaskSender<S>,
 }
@@ -34,8 +33,8 @@ impl<S> TaskSpawner<S> {
     /// It occurs when the TaskSpawner has been closed
     /// or the associated [JoinQueue] has been aborted or cancelled.
     /// From this point onward,
-    /// [TaskHandle]s obtained from [spawn](Self::spawn) or [spawn_blocking](Self::spawn_blocking)
-    /// immediately return errors for which [TaskError::is_task_spawner_unavailable] returns true.
+    /// [TaskHandle]s obtained from [spawn()](Self::spawn) or [spawn_blocking()](Self::spawn_blocking)
+    /// immediately return errors for which [TaskError::kind()](TaskError::kind) returns [TaskErrorKind::TaskSpawnerUnavailable].
     pub fn is_unavailable(&self) -> bool {
         self.sender.is_unavailable()
     }
@@ -43,16 +42,17 @@ impl<S> TaskSpawner<S> {
     /// Returns true if a task previously executed by the associated [JoinQueue] has panicked.
     /// 
     /// Once a task has panicked, while this TaskSpawner is not unavailable,
-    /// [TaskHandle]s obtained from [spawn](Self::spawn) or [spawn_blocking](Self::spawn_blocking)
-    /// immediately return errors for which [TaskError::is_prev_task_panic] returns true.
+    /// [TaskHandle]s obtained from [spawn()](Self::spawn) or [spawn_blocking()](Self::spawn_blocking)
+    /// immediately return errors
+    /// for which [TaskError::kind()](TaskError::kind) returns [TaskErrorKind::PreviousTaskPanic].
     /// Because the state invariants may have been violated by the task's panic.
     /// 
     /// Returns None if the TaskSpawner is unavailable.
     /// It occurs when the TaskSpawner has been closed
-    /// or the [JoinQueue] has been aborted or cancelled.
+    /// or the JoinQueue has been aborted or cancelled.
     /// From this point onward, 
-    /// [TaskHandle]s obtained from spawn or spawn_blocking
-    /// immediately return errors for which [TaskError::is_task_spawner_unavailable] returns true.
+    /// TaskHandles obtained from spawn or spawn_blocking
+    /// immediately return errors for which TaskError::kind() returns [TaskErrorKind::TaskSpawnerUnavailable].
     pub fn has_panicked(&self) -> Option<bool> {
         self.sender.has_panicked()
     }
@@ -67,12 +67,11 @@ impl<S: Send + 'static> TaskSpawner<S> {
     /// Tasks are executed sequentially in the order they are queued,
     /// regardless of whether they are asynchronous or blocking.
     ///
-    /// This method is equivalent to [JoinQueue::spawn],
+    /// This method is equivalent to [JoinQueue::spawn()](JoinQueue::spawn),
     /// except that the returned TaskHandle immediately returns an error
     /// if this TaskSpawner can no longer spawn tasks,
     /// such as when the TaskSpawner has been closed
     /// or the associated [JoinQueue] has been aborted or cancelled.
-    /// In such cases, [TaskError::is_task_spawner_unavailable] returns true.
     /// 
     /// # Panics
     /// Panics if this method is called outside Tokio runtime.
@@ -105,12 +104,11 @@ impl<S: Send + 'static> TaskSpawner<S> {
     /// The blocking task is executed using [Tokio's blocking thread pool](https://docs.rs/tokio/latest/tokio/task/fn.spawn_blocking.html)
     /// to avoid blocking the asynchronous runtime.
     /// 
-    /// This method is equivalent to [JoinQueue::spawn_blocking],
+    /// This method is equivalent to [JoinQueue::spawn_blocking()](JoinQueue::spawn_blocking),
     /// except that the returned TaskHandle immediately returns an error
     /// if this TaskSpawner can no longer spawn tasks,
     /// such as when the TaskSpawner has been closed
     /// or the associated [JoinQueue] has been aborted or cancelled.
-    /// In such cases, [TaskError::is_task_spawner_unavailable] returns true.
     /// 
     /// # Panics
     /// Panics if this method is called outside Tokio runtime.
@@ -192,7 +190,7 @@ mod tests {
             }));
 
             assert!(h1.await.is_ok());
-            assert!(h2.await.unwrap_err().is_task_spawner_unavailable());
+            assert!(h2.await.unwrap_err().kind().is_task_spawner_unavailable());
         });
 
         rx.await.unwrap();
@@ -244,15 +242,15 @@ mod tests {
         let h = queue.spawn(|_| Box::pin(async { panic!() }));
         let err = h.await.unwrap_err();
         assert!(err.is_panic());
-        assert!(err.is_task_panic());
-        assert!(!err.is_prev_task_panic());
+        assert!(err.kind().is_task_panic());
+        assert!(!err.kind().is_previous_task_panic());
 
         queue.close_spawners();
         let h = spawner.spawn(|_| Box::pin(async {}));
         let err = h.await.unwrap_err();
         assert!(!err.is_panic());
         assert!(err.is_cancelled());
-        assert!(err.is_task_spawner_unavailable());
+        assert!(err.kind().is_task_spawner_unavailable());
     }
 
     #[tokio::test]
@@ -263,15 +261,15 @@ mod tests {
         let h = queue.spawn(|_| Box::pin(async { panic!() }));
         let err = h.await.unwrap_err();
         assert!(err.is_panic());
-        assert!(err.is_task_panic());
-        assert!(!err.is_prev_task_panic());
+        assert!(err.kind().is_task_panic());
+        assert!(!err.kind().is_previous_task_panic());
 
         drop(queue);
         let h = spawner.spawn(|_| Box::pin(async {}));
         let err = h.await.unwrap_err();
         assert!(!err.is_panic());
         assert!(err.is_cancelled());
-        assert!(err.is_task_spawner_unavailable());
+        assert!(err.kind().is_task_spawner_unavailable());
     }
 
     #[tokio::test]
@@ -282,15 +280,15 @@ mod tests {
         let h = queue.spawn(|_| Box::pin(async { panic!() }));
         let err = h.await.unwrap_err();
         assert!(err.is_panic());
-        assert!(err.is_task_panic());
-        assert!(!err.is_prev_task_panic());
+        assert!(err.kind().is_task_panic());
+        assert!(!err.kind().is_previous_task_panic());
 
         queue.cancel();
         let h = spawner.spawn(|_| Box::pin(async {}));
         let err = h.await.unwrap_err();
         assert!(!err.is_panic());
         assert!(err.is_cancelled());
-        assert!(err.is_task_spawner_unavailable());
+        assert!(err.kind().is_task_spawner_unavailable());
     }
 
     #[tokio::test]
@@ -301,8 +299,8 @@ mod tests {
         let h = queue.spawn(|_| Box::pin(async { panic!() }));
         let err = h.await.unwrap_err();
         assert!(err.is_panic());
-        assert!(err.is_task_panic());
-        assert!(!err.is_prev_task_panic());
+        assert!(err.kind().is_task_panic());
+        assert!(!err.kind().is_previous_task_panic());
 
         spawn(async move {
             sleep(Duration::from_secs(1)).await;
@@ -310,7 +308,7 @@ mod tests {
             let err = h.await.unwrap_err();
             assert!(!err.is_panic());
             assert!(err.is_cancelled());
-            assert!(err.is_task_spawner_unavailable());
+            assert!(err.kind().is_task_spawner_unavailable());
         });
 
         assert!(queue.cancel_and_try_join().await.is_err());
@@ -337,7 +335,7 @@ mod tests {
         let spawner = queue.spawner();
         drop(queue);
         let h = spawner.spawn(|_| Box::pin(async {}));
-        assert!(h.await.unwrap_err().is_task_spawner_unavailable());
+        assert!(h.await.unwrap_err().kind().is_task_spawner_unavailable());
     }
 
     #[tokio::test]
@@ -351,7 +349,7 @@ mod tests {
         queue.spawn(|_| Box::pin(async { panic!() }));
 
         let h = spawner.spawn(|_| Box::pin(async {}));
-        assert!(h.await.unwrap_err().is_prev_task_panic());
+        assert!(h.await.unwrap_err().kind().is_previous_task_panic());
 
         assert!(!spawner.is_unavailable());
         assert!(spawner.has_panicked().unwrap());
@@ -360,7 +358,7 @@ mod tests {
         assert!(spawner.has_panicked().is_none());
 
         let h = spawner.spawn(|_| Box::pin(async {}));
-        assert!(h.await.unwrap_err().is_task_spawner_unavailable());
+        assert!(h.await.unwrap_err().kind().is_task_spawner_unavailable());
     }
 
     #[tokio::test]
@@ -374,7 +372,7 @@ mod tests {
         queue.spawn(|_| Box::pin(async { panic!() }));
 
         let h = spawner.spawn(|_| Box::pin(async {}));
-        assert!(h.await.unwrap_err().is_prev_task_panic());
+        assert!(h.await.unwrap_err().kind().is_previous_task_panic());
 
         assert!(!spawner.is_unavailable());
         assert!(spawner.has_panicked().unwrap());
@@ -383,7 +381,7 @@ mod tests {
         assert!(spawner.has_panicked().is_none());
 
         let h = spawner.spawn(|_| Box::pin(async {}));
-        assert!(h.await.unwrap_err().is_task_spawner_unavailable());
+        assert!(h.await.unwrap_err().kind().is_task_spawner_unavailable());
     }
 
     #[tokio::test]
@@ -397,7 +395,7 @@ mod tests {
         queue.spawn(|_| Box::pin(async { panic!() }));
 
         let h = spawner.spawn(|_| Box::pin(async {}));
-        assert!(h.await.unwrap_err().is_prev_task_panic());
+        assert!(h.await.unwrap_err().kind().is_previous_task_panic());
 
         assert!(!spawner.is_unavailable());
         assert!(spawner.has_panicked().unwrap());
@@ -406,7 +404,7 @@ mod tests {
         assert!(spawner.has_panicked().is_none());
 
         let h = spawner.spawn(|_| Box::pin(async {}));
-        assert!(h.await.unwrap_err().is_task_spawner_unavailable());
+        assert!(h.await.unwrap_err().kind().is_task_spawner_unavailable());
     }
 
     #[tokio::test]
@@ -420,7 +418,7 @@ mod tests {
         queue.spawn(|_| Box::pin(async { panic!() }));
 
         let h = spawner.spawn(|_| Box::pin(async {}));
-        assert!(h.await.unwrap_err().is_prev_task_panic());
+        assert!(h.await.unwrap_err().kind().is_previous_task_panic());
 
         assert!(!spawner.is_unavailable());
         assert!(spawner.has_panicked().unwrap());
@@ -429,7 +427,7 @@ mod tests {
         assert!(spawner.has_panicked().is_none());
 
         let h = spawner.spawn(|_| Box::pin(async {}));
-        assert!(h.await.unwrap_err().is_task_spawner_unavailable());
+        assert!(h.await.unwrap_err().kind().is_task_spawner_unavailable());
     }
 
     #[tokio::test]

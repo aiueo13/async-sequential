@@ -125,7 +125,7 @@ impl<R> TaskHandle<R> {
 
     /// Returns a [TaskCanceller] that can be used to cancel the task.
     ///
-    /// The returned canceller has the same cancellation behavior as [cancel](Self::cancel).
+    /// The returned canceller has the same cancellation behavior as [cancel()](Self::cancel).
     /// It can be used independently of this handle, allowing cancellation to be
     /// triggered from a different task or stored separately from the handle.
     ///
