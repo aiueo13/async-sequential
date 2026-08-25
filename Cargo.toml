@@ -10,7 +10,7 @@ repository = "https://github.com/aiueo13/async-sequential"
 readme = "README.md"
 
 [dependencies]
-tokio = { version = "1", default-features = false, features = [
+tokio = { version = "1", features = [
     # For `tokio::task::spawn` and `tokio::task::spawn_blocking`
     "rt",
     # For `tokio::sync::oneshot`
