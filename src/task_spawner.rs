@@ -75,7 +75,7 @@ impl<S> TaskSpawner<S> {
     /// Other [TaskSpawner]s associated with the same [JoinQueue] are not affected
     /// and can continue to spawn tasks.
     ///
-    /// Once this TaskSpawner is closed,
+    /// Once the TaskSpawner is closed,
     /// [spawn()] and [spawn_blocking()] return a [TaskHandle]
     /// that immediately resolves to an error
     /// for which [TaskError::kind()] is [TaskErrorKind::TaskSpawnerUnavailable].
