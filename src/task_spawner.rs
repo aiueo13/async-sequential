@@ -100,9 +100,15 @@ impl<S: Send + 'static> TaskSpawner<S> {
     /// returning a [TaskHandle] to wait for it to complete.
     /// 
     /// This method returns a TaskHandle that immediately resolves to an error
-    /// if called after this TaskSpawner can no longer spawn tasks,
+    /// if this method is called after this TaskSpawner can no longer spawn tasks,
     /// such as when the TaskSpawner has been closed
     /// or the TaskQueue has been aborted or cancelled.
+    /// In that case, [TaskError::kind()] returns [TaskErrorKind::TaskSpawnerUnavailable].
+    /// 
+    /// [TaskHandle]: crate::TaskHandle
+    /// [TaskQueue]: crate::TaskQueue
+    /// [TaskError::kind()]: crate::TaskError::kind
+    /// [TaskErrorKind::TaskSpawnerUnavailable]: crate::TaskErrorKind::TaskSpawnerUnavailable
     pub fn spawn<T, R>(&self, task: T) -> TaskHandle<R>
     where
         T: for<'a> FnOnce(&'a mut S) -> Pin<Box<dyn Future<Output = R> + Send + 'a>> + Send + 'static,
@@ -126,13 +132,20 @@ impl<S: Send + 'static> TaskSpawner<S> {
     /// on the associated [TaskQueue],
     /// returning a [TaskHandle] to wait for it to complete.
     /// 
-    /// The blocking task is executed using [Tokio's blocking thread pool](https://docs.rs/tokio/latest/tokio/task/fn.spawn_blocking.html)
+    /// The blocking task is executed using [Tokio's blocking thread pool]
     /// to avoid blocking the asynchronous runtime.
     /// 
     /// This method returns a TaskHandle that immediately resolves to an error
-    /// if called after this TaskSpawner can no longer spawn tasks,
+    /// if this method is called after this TaskSpawner can no longer spawn tasks,
     /// such as when the TaskSpawner has been closed
     /// or the TaskQueue has been aborted or cancelled.
+    /// In that case, [TaskError::kind()] returns [TaskErrorKind::TaskSpawnerUnavailable].
+    /// 
+    /// [TaskHandle]: crate::TaskHandle
+    /// [TaskQueue]: crate::TaskQueue
+    /// [TaskError::kind()]: crate::TaskError::kind
+    /// [TaskErrorKind::TaskSpawnerUnavailable]: crate::TaskErrorKind::TaskSpawnerUnavailable
+    /// [Tokio's blocking thread pool]: https://docs.rs/tokio/latest/tokio/task/fn.spawn_blocking.html
     pub fn spawn_blocking<T, R>(&self, task: T) -> TaskHandle<R>
     where
         T: (FnOnce(&mut S) -> R) + Send + 'static,
