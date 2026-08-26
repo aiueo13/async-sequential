@@ -118,7 +118,7 @@ impl<S> WorkerHandle<S> {
         }
 
         // 全ての task_tx を破棄する。
-        self.close_task_senders();
+        self.close_senders();
         drop(self.shared_task_senders_ctx);
         drop(self.task_tx);
     }
@@ -129,7 +129,7 @@ impl<S> WorkerHandle<S> {
         }
 
         // 全ての task_tx を破棄する。
-        self.close_task_senders();
+        self.close_senders();
         drop(self.shared_task_senders_ctx);
         drop(self.task_tx);
     }
@@ -140,7 +140,7 @@ impl<S> WorkerHandle<S> {
         }
 
         // 全ての task_tx を破棄する。
-        self.close_task_senders();
+        self.close_senders();
         drop(self.shared_task_senders_ctx);
         drop(self.task_tx);
 
@@ -180,7 +180,7 @@ impl<S> WorkerHandle<S> {
         }
     }
 
-    pub fn close_task_senders(&mut self) {
+    pub fn close_senders(&mut self) {
         // 既存の全ての WorkerTaskSender が保持する ctx を削除する。
         let ctx = self.shared_task_senders_ctx.lock().unwrap_or_else(|e| e.into_inner()).take();
         self.shared_task_senders_ctx = Arc::new(SyncMutex::new(ctx));
@@ -197,10 +197,7 @@ impl<S> WorkerHandle<S> {
     }
 
     pub fn sender(&self) -> WorkerTaskSender<S> {
-        WorkerTaskSender {
-            shared_ctx: Arc::clone(&self.shared_task_senders_ctx),
-            worker_state: Arc::clone(&self.worker_state)
-        }
+        WorkerTaskSender::new(&self.shared_task_senders_ctx, &self.worker_state)
     }
 
     pub fn send(&self, task: Task<S>) -> Result<Arc<WorkerState>, WorkerSendError> {
@@ -222,24 +219,43 @@ struct WorkerTaskSenderCtx<S> {
 }
 
 pub struct WorkerTaskSender<S> {
-    shared_ctx: Arc<SyncMutex<Option<WorkerTaskSenderCtx<S>>>>,
+    ctx: SyncMutex<Option<Arc<SyncMutex<Option<WorkerTaskSenderCtx<S>>>>>>,
     worker_state: Arc<WorkerState>,
 }
 
 impl<S> WorkerTaskSender<S> {
 
+    fn new(
+        shared_ctx: &Arc<SyncMutex<Option<WorkerTaskSenderCtx<S>>>>,
+        worker_state: &Arc<WorkerState>,
+    ) -> Self {
+
+        Self {
+            ctx: SyncMutex::new(Some(Arc::clone(&shared_ctx))),
+            worker_state: Arc::clone(&worker_state)
+        }
+    }
+
     pub fn is_unavailable(&self) -> bool {
-        let locked_ctx = self.shared_ctx.lock().unwrap_or_else(|e| e.into_inner());
-        locked_ctx.is_none()
+        let locked_ctx = self.ctx.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(ctx) = locked_ctx.as_ref() else {
+            return false;
+        };
+        let locked_shared_ctx = ctx.lock().unwrap_or_else(|e| e.into_inner());
+        locked_shared_ctx.is_none()
     }
 
     pub fn has_panicked(&self) -> Option<bool> {
-        let locked_ctx = self.shared_ctx.lock().unwrap_or_else(|e| e.into_inner());
-        let Some(locked_ctx) = locked_ctx.as_ref() else {
+        let locked_ctx = self.ctx.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(ctx) = locked_ctx.as_ref() else {
+            return None;
+        };
+        let locked_shared_ctx = ctx.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(shared_ctx) = locked_shared_ctx.as_ref() else {
             return None;
         };
 
-        if locked_ctx.worker_handle.is_finished() {
+        if shared_ctx.worker_handle.is_finished() {
             let f = self.worker_state.flags();
             let is_prev_task_panic = !f.has_abort_started() && !f.has_cancel_started();
             Some(is_prev_task_panic)
@@ -248,17 +264,26 @@ impl<S> WorkerTaskSender<S> {
             Some(false)
         }
     }
+
+    pub fn close(&self) {
+        let mut locked_ctx = self.ctx.lock().unwrap_or_else(|e| e.into_inner());
+        *locked_ctx = None;
+    }
 }
 
 impl<S: Send + 'static> WorkerTaskSender<S> {
 
     pub fn send(&self, task: Task<S>) -> Result<Arc<WorkerState>, WorkerTaskSenderSendError> {
         let result = {
-            let locked_ctx = self.shared_ctx.lock().unwrap_or_else(|e| e.into_inner());
-            let Some(ref locked_ctx) = *locked_ctx else {
+            let locked_ctx = self.ctx.lock().unwrap_or_else(|e| e.into_inner());
+            let Some(ctx) = locked_ctx.as_ref() else {
                 return Err(WorkerTaskSenderSendError::Unavailable)
             };
-            locked_ctx.task_tx.send(task)
+            let locked_shared_ctx = ctx.lock().unwrap_or_else(|e| e.into_inner());
+            let Some(ref shared_ctx) = *locked_shared_ctx else {
+                return Err(WorkerTaskSenderSendError::Unavailable)
+            };
+            shared_ctx.task_tx.send(task)
         };
         
         match result {

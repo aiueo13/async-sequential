@@ -7,7 +7,8 @@ use std::pin::Pin;
 /// This TaskSpawner can be obtained from [JoinQueue::spawner()](JoinQueue::spawner).
 /// 
 /// Note that [JoinQueue::join()](JoinQueue::join) and [JoinQueue::try_join()](JoinQueue::try_join) do not complete as long as any TaskSpawner remains alive.
-/// To allow it to complete, either drop all TaskSpawners
+/// To allow it to complete, 
+/// either drop all TaskSpawners, call [close()](TaskSpawner::close) on all TaskSpawners,
 /// or call [JoinQueue::close_spawners()](JoinQueue::close_spawners) beforehand.
 pub struct TaskSpawner<S> {
     sender: internal::WorkerTaskSender<S>,
@@ -67,6 +68,29 @@ impl<S> TaskSpawner<S> {
     pub fn has_panicked(&self) -> Option<bool> {
         self.sender.has_panicked()
     }
+
+    /// Closes this TaskSpawner, preventing it from spawning any new tasks.
+    ///
+    /// Tasks that have already been queued are still executed normally.
+    /// Other [TaskSpawner]s associated with the same [JoinQueue] are not affected
+    /// and can continue to spawn tasks.
+    ///
+    /// Once this TaskSpawner is closed,
+    /// [spawn()] and [spawn_blocking()] return a [TaskHandle]
+    /// that immediately resolves to an error
+    /// for which [TaskError::kind()] is [TaskErrorKind::TaskSpawnerUnavailable].
+    ///
+    /// The TaskSpawner behaves the same way when it is dropped.
+    /// 
+    /// [spawn()]: Self::spawn
+    /// [spawn_blocking()]: Self::spawn_blocking
+    /// [JoinQueue]: crate::JoinQueue
+    /// [TaskHandle]: crate::TaskHandle
+    /// [TaskError::kind()]: crate::TaskError::kind
+    /// [TaskErrorKind::TaskSpawnerUnavailable]: crate::TaskErrorKind::TaskSpawnerUnavailable
+    pub fn close(&self) {
+        self.sender.close();
+    }
 }
 
 impl<S: Send + 'static> TaskSpawner<S> {
@@ -79,8 +103,8 @@ impl<S: Send + 'static> TaskSpawner<S> {
     /// regardless of whether they are asynchronous or blocking.
     ///
     /// This method is equivalent to [JoinQueue::spawn()](JoinQueue::spawn),
-    /// except that if this method is called after this TaskSpawner can no longer spawn tasks,
-    /// it returns a TaskHandle that immediately resolves to an error,
+    /// except that this method returns a TaskHandle that immediately resolves to an error
+    /// if it is called after this TaskSpawner can no longer spawn tasks,
     /// such as when the TaskSpawner has been closed
     /// or the associated [JoinQueue] has been aborted or cancelled.
     /// 
@@ -116,8 +140,8 @@ impl<S: Send + 'static> TaskSpawner<S> {
     /// to avoid blocking the asynchronous runtime.
     /// 
     /// This method is equivalent to [JoinQueue::spawn_blocking()](JoinQueue::spawn_blocking),
-    /// except that if this method is called after this TaskSpawner can no longer spawn tasks,
-    /// it returns a TaskHandle that immediately resolves to an error,
+    /// except that this method returns a TaskHandle that immediately resolves to an error
+    /// if it is called after this TaskSpawner can no longer spawn tasks,
     /// such as when the TaskSpawner has been closed
     /// or the associated [JoinQueue] has been aborted or cancelled.
     /// 
@@ -459,20 +483,65 @@ mod tests {
         let result = queue.join().await;
         assert_eq!(result, 1000 * 1000);
     }
+
+    #[tokio::test]
+    async fn test17() {
+        let queue = JoinQueue::new("state");
+        let spawner = queue.spawner();
+        assert_eq!(spawner.has_panicked(), Some(false));
+        assert!(!spawner.is_unavailable());
+        spawner.close();
+        assert!(!spawner.is_unavailable());
+        assert_eq!(spawner.has_panicked(), None);
+        assert_eq!(queue.join().await, "state");
+    }
+
+    #[tokio::test]
+    async fn test18() {
+        let queue = JoinQueue::new(());
+        let _ = queue.spawn(|_| Box::pin(async { panic!()})).await;
+
+        let spawner = queue.spawner();
+        assert_eq!(spawner.has_panicked(), Some(true));
+    }
+
+    #[tokio::test]
+    async fn test19() {
+        let queue = JoinQueue::new(());
+
+        let spawner = queue.spawner();
+        assert_eq!(spawner.has_panicked(), Some(false));
+        let _ = spawner.spawn(|_| Box::pin(async { panic!()})).await;
+        assert_eq!(spawner.has_panicked(), Some(true));
+    }
+
+    #[tokio::test]
+    async fn test20() {
+        let queue = JoinQueue::new(());
+        let _ = queue.spawn(|_| Box::pin(async { })).await;
+
+        let spawner = queue.spawner();
+        assert_eq!(spawner.has_panicked(), Some(false));
+        let _ = spawner.spawn(|_| Box::pin(async { panic!()})).await;
+        assert_eq!(spawner.has_panicked(), Some(true));
+    }
 }
 
 #[cfg(test)]
 mod asserts {
+    use std::panic::{RefUnwindSafe, UnwindSafe};
     use super::*;
 
-    fn require_send_sync_static<F: Send + Sync + 'static>(_: F) {}
+    fn require_send_static_unpin_unwindsafe<F: Send + 'static + Unpin + UnwindSafe + RefUnwindSafe>(_: F) {}
+    fn require_send_static_unpin<F: Send + 'static + Unpin>(_: F) {}
 
     #[allow(unused)]
     fn assert_impls() {
         let queue = JoinQueue::new(());
         let spawner = queue.spawner();
-        require_send_sync_static(spawner.spawn(|_| Box::pin(async {})));
-        require_send_sync_static(spawner.spawn_blocking(|_| {}));
-        require_send_sync_static(spawner);
+
+        require_send_static_unpin(spawner.spawn(|_| Box::pin(async {})));
+        require_send_static_unpin(spawner.spawn_blocking(|_| {}));
+        require_send_static_unpin_unwindsafe(spawner);
     }
 }

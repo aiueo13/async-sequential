@@ -10,7 +10,7 @@ use tokio::sync::oneshot;
 
 pub fn build_async_task<S, T, R>(
     task: T,
-) -> (Task<S>, TaskResultReceiver<R>, TaskCanceller)
+) -> (Task<S>, TaskResultReceiver<R>, Arc<dyn TaskCanceller>)
 where 
     S: Send + 'static,
     T: for<'a> FnOnce(&'a mut S) -> Pin<Box<dyn Future<Output = R> + Send + 'a>> + Send + 'static,
@@ -22,7 +22,7 @@ where
 
 pub fn build_blocking_task<S, T, R>(
     task: T,
-) -> (Task<S>, TaskResultReceiver<R>, TaskCanceller)
+) -> (Task<S>, TaskResultReceiver<R>, Arc<dyn TaskCanceller>)
 where 
     S: Send + 'static,
     T: (FnOnce(&mut S) -> R) + Send + 'static,
@@ -90,14 +90,14 @@ where
 fn build_cancellable_task<S, R>(
     task: RawTask<S>,
     result_rx: oneshot::Receiver<R>,
-) -> (Task<S>, TaskResultReceiver<R>, TaskCanceller)
+) -> (Task<S>, TaskResultReceiver<R>, Arc<dyn TaskCanceller>)
 where 
     S: Send + 'static,
 {
     let (panic_tx, panic_rx) = oneshot::channel();
     let panic_sender = TaskPanicSender::new(panic_tx);
     let task = Arc::new(OnceTake::new((task, panic_sender)));
-    let canceller = TaskCanceller::new(Arc::downgrade(&task));
+    let canceller = Arc::new(TaskCancellerImpl::new(Arc::downgrade(&task)));
     let result = TaskResultReceiver::new(result_rx, panic_rx);
     (Task::new_cancellable(task), result, canceller)
 }
@@ -224,49 +224,42 @@ impl<R> Future for TaskResultReceiver<R> {
     }
 }
 
-#[derive(Clone)]
-pub struct TaskCanceller {
-    repr: Arc<dyn (Fn(TaskControllerReprRequest) -> bool) + Sync + Send + RefUnwindSafe + UnwindSafe + 'static>
-}
-
-enum TaskControllerReprRequest {
-    Cancel,
-    IsCancelled,
-}
-
-impl TaskCanceller {
-
-    fn new<S: Send + 'static>(task: Weak<OnceTake<S>>) -> Self {
-        let is_cancelled = AtomicBool::new(false);
-        let repr = Arc::new(move |request: TaskControllerReprRequest| {
-            match request {
-                TaskControllerReprRequest::Cancel => {
-                    let did_cancelled = task.upgrade().is_some_and(|task| task.take().is_some());
-                    if did_cancelled {
-                        is_cancelled.store(true, Ordering::Release);
-                    }
-                    did_cancelled
-                },
-                TaskControllerReprRequest::IsCancelled => {
-                    is_cancelled.load(Ordering::Acquire)
-                },
-            }
-        });
-
-        Self { repr }
-    }
-}
-
-impl TaskCanceller {
+pub trait TaskCanceller: Sync + Send + RefUnwindSafe + UnwindSafe + 'static {
 
     /// すでにキャンセルされているかを返す。
-    pub fn is_cancelled(&self) -> bool {
-        (self.repr)(TaskControllerReprRequest::IsCancelled)
-    }
+    fn is_cancelled(&self) -> bool;
 
     /// タスクが実行待機中の場合はタスクをキャンセルし、 true を返す。
     /// タスクが実行中か実行済みの場合は何も行わず false を返す。
-    pub fn cancel(&self) -> bool {
-        (self.repr)(TaskControllerReprRequest::Cancel)
+    fn cancel(&self) -> bool;
+}
+
+struct TaskCancellerImpl<S> {
+    task: Weak<OnceTake<S>>,
+    is_cancelled: AtomicBool
+}
+
+impl<S> TaskCancellerImpl<S> {
+
+    fn new(task: Weak<OnceTake<S>>) -> Self {
+        Self {
+            task,
+            is_cancelled: AtomicBool::new(false)
+        }
+    }
+}
+
+impl<S: Send + 'static> TaskCanceller for TaskCancellerImpl<S> {
+
+    fn cancel(&self) -> bool {
+        let did_cancelled = self.task.upgrade().is_some_and(|task| task.take().is_some());
+        if did_cancelled {
+            self.is_cancelled.store(true, Ordering::Release);
+        }
+        did_cancelled
+    }
+
+    fn is_cancelled(&self) -> bool {
+        self.is_cancelled.load(Ordering::Acquire)
     }
 }

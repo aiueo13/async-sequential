@@ -93,7 +93,8 @@ impl<S> JoinQueue<S> {
     ///
     /// Note that this method does not complete as long as any [TaskSpawner]
     /// obtained from [spawner()](JoinQueue::spawner) remains alive.
-    /// To allow it to complete, either drop all TaskSpawners
+    /// To allow it to complete, 
+    /// either drop all TaskSpawners, call [TaskSpawner::close()](TaskSpawner::close) on all TaskSpawners,
     /// or call [close_spawners()](JoinQueue::close_spawners) beforehand.
     /// 
     /// # Panics
@@ -107,7 +108,8 @@ impl<S> JoinQueue<S> {
     ///
     /// Note that this method does not complete as long as any [TaskSpawner]
     /// obtained from [spawner()](JoinQueue::spawner) remains alive.
-    /// To allow it to complete, either drop all TaskSpawners
+    /// To allow it to complete, 
+    /// either drop all TaskSpawners, call [TaskSpawner::close()](TaskSpawner::close) on all TaskSpawners,
     /// or call [close_spawners()](JoinQueue::close_spawners) beforehand.
     /// 
     /// # Errors
@@ -233,7 +235,7 @@ impl<S> JoinQueue<S> {
         let mut worker = self.worker.lock().unwrap();
         match &mut *worker {
             Some(Worker::Unstarted { .. }) => {},
-            Some(Worker::Started { worker_handle }) => worker_handle.close_task_senders(),
+            Some(Worker::Started { worker_handle }) => worker_handle.close_senders(),
             None => unreachable!("illegal closed queue"),
         }
     }
@@ -244,7 +246,8 @@ impl<S: Send + 'static> JoinQueue<S> {
     /// Returns a [TaskSpawner] for queuing tasks onto this JoinQueue.
     /// 
     /// Note that [join()](JoinQueue::join) and [try_join()](JoinQueue::try_join) do not complete as long as any TaskSpawner remains alive.
-    /// To allow it to complete, either drop all TaskSpawners
+    /// To allow it to complete, 
+    /// either drop all TaskSpawners, call [TaskSpawner::close()](TaskSpawner::close) on all TaskSpawners,
     /// or call [close_spawners()](JoinQueue::close_spawners) beforehand.
     /// 
     /// # Panics
@@ -492,14 +495,19 @@ impl<S> Drop for JoinQueue<S> {
 }
 
 #[cfg(test)]
-mod tests {
+mod asserts {
     use super::*;
+    use std::panic::{RefUnwindSafe, UnwindSafe};
 
+    fn require_send_static_unpin_unwindsafe<F: Send + 'static + Unpin + UnwindSafe + RefUnwindSafe>(_: F) {}
     fn require_send_static<F: Send + 'static>(_: F) {}
     fn require_send<F: Send>(_: F) {}
 
     #[allow(unused)]
     fn assert_impls() {
+        let queue = JoinQueue::new(());
+        require_send_static_unpin_unwindsafe(queue);
+        
         let queue = JoinQueue::new(());
         require_send_static(queue.join());
 
@@ -523,6 +531,5 @@ mod tests {
 
         let queue = JoinQueue::new(());
         require_send(queue.execute_blocking(|_| {}));
-        require_send(queue);
     }
 }

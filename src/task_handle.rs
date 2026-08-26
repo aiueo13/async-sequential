@@ -13,7 +13,7 @@ pub struct TaskHandle<R> {
 enum Repr<R> {
     CancellableTask {
         task_result: internal::TaskResultReceiver<R>,
-        task_canceller: internal::TaskCanceller,
+        task_canceller: Arc<dyn internal::TaskCanceller>,
         worker_state: Arc<internal::WorkerState>,
     },
     ScopedNoncancellableTask {
@@ -42,7 +42,7 @@ impl<R> TaskHandle<R> {
 
     pub(crate) fn new(
         task_result: internal::TaskResultReceiver<R>,
-        task_canceller: internal::TaskCanceller,
+        task_canceller: Arc<dyn internal::TaskCanceller>,
         worker_state: Arc<internal::WorkerState>,
     ) -> Self {
 
@@ -155,7 +155,7 @@ impl<R> TaskHandle<R> {
                 TaskCanceller::noncancellable()
             },
             Repr::CancellableTask { task_canceller, worker_state, .. } => {
-                let task_canceller = task_canceller.clone();
+                let task_canceller = Arc::clone(task_canceller);
                 let worker_state = Arc::clone(worker_state);
 
                 TaskCanceller::new(Arc::new(move || {

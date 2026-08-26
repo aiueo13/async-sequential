@@ -555,6 +555,9 @@ mod tests3 {
     #[tokio::test]
     async fn test_executer_panicked() {
         let queue = JoinQueue::new(());
+        assert!(!queue.has_panicked());
+        let _ = queue.spawn_blocking(|_| { }).await; 
+        assert!(!queue.has_panicked());
         let h = queue.spawn_blocking(|_| { panic!() }); 
         let r = h.await;
         assert!(queue.has_panicked());
