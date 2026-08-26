@@ -6,12 +6,6 @@ use std::pin::Pin;
 ///
 /// This TaskSpawner can be obtained from [TaskQueue::spawner()](TaskQueue::spawner).
 /// 
-/// The TaskSpawner provides methods equivalent to [TaskQueue::spawn()](TaskQueue::spawn) and [TaskQueue::spawn_blocking()](TaskQueue::spawn_blocking), 
-/// but they return a [TaskHandle] that immediately resolves to an error
-/// if they are called after the TaskSpawner can no longer spawn tasks,
-/// such as when the TaskSpawner has been closed 
-/// or the associated TaskQueue has been aborted or cancelled.
-/// 
 /// Note that [TaskQueue::join()](TaskQueue::join) and [TaskQueue::try_join()](TaskQueue::try_join) do not complete as long as any TaskSpawner remains alive.
 /// To allow it to complete, 
 /// either drop all TaskSpawners, call [close()](TaskSpawner::close) on all TaskSpawners,
@@ -105,11 +99,10 @@ impl<S: Send + 'static> TaskSpawner<S> {
     /// on the associated [TaskQueue], 
     /// returning a [TaskHandle] to wait for it to complete.
     /// 
-    /// This method is equivalent to [TaskQueue::spawn()](TaskQueue::spawn),
-    /// except that this method returns a TaskHandle that immediately resolves to an error
-    /// if it is called after this TaskSpawner can no longer spawn tasks,
+    /// This method returns a TaskHandle that immediately resolves to an error
+    /// if called after this TaskSpawner can no longer spawn tasks,
     /// such as when the TaskSpawner has been closed
-    /// or the associated [TaskQueue] has been aborted or cancelled.
+    /// or the TaskQueue has been aborted or cancelled.
     pub fn spawn<T, R>(&self, task: T) -> TaskHandle<R>
     where
         T: for<'a> FnOnce(&'a mut S) -> Pin<Box<dyn Future<Output = R> + Send + 'a>> + Send + 'static,
@@ -136,11 +129,10 @@ impl<S: Send + 'static> TaskSpawner<S> {
     /// The blocking task is executed using [Tokio's blocking thread pool](https://docs.rs/tokio/latest/tokio/task/fn.spawn_blocking.html)
     /// to avoid blocking the asynchronous runtime.
     /// 
-    /// This method is equivalent to [TaskQueue::spawn_blocking()](TaskQueue::spawn_blocking),
-    /// except that this returns a TaskHandle that immediately resolves to an error
-    /// if it is called after this TaskSpawner can no longer spawn tasks,
+    /// This method returns a TaskHandle that immediately resolves to an error
+    /// if called after this TaskSpawner can no longer spawn tasks,
     /// such as when the TaskSpawner has been closed
-    /// or the associated [TaskQueue] has been aborted or cancelled.
+    /// or the TaskQueue has been aborted or cancelled.
     pub fn spawn_blocking<T, R>(&self, task: T) -> TaskHandle<R>
     where
         T: (FnOnce(&mut S) -> R) + Send + 'static,

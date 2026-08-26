@@ -242,12 +242,6 @@ impl<S: Send + 'static> TaskQueue<S> {
 
     /// Returns a [TaskSpawner] for queuing tasks onto this TaskQueue.
     /// 
-    /// The TaskSpawner provides methods equivalent to [spawn()](TaskQueue::spawn) and [spawn_blocking()](TaskQueue::spawn_blocking), 
-    /// but they return a [TaskHandle] that immediately resolves to an error
-    /// if they are called after the TaskSpawner can no longer spawn tasks,
-    /// such as when the TaskSpawner has been closed 
-    /// or this TaskQueue has been aborted or cancelled.
-    /// 
     /// Note that [join()](TaskQueue::join) and [try_join()](TaskQueue::try_join) do not complete as long as any TaskSpawner remains alive.
     /// To allow it to complete, 
     /// either drop all TaskSpawners, call [TaskSpawner::close()](TaskSpawner::close) on all TaskSpawners,
