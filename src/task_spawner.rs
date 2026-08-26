@@ -6,6 +6,12 @@ use std::pin::Pin;
 ///
 /// This TaskSpawner can be obtained from [TaskQueue::spawner()](TaskQueue::spawner).
 /// 
+/// The TaskSpawner provides methods equivalent to [TaskQueue::spawn()](TaskQueue::spawn) and [TaskQueue::spawn_blocking()](TaskQueue::spawn_blocking), 
+/// but they return a [TaskHandle] that immediately resolves to an error
+/// if they are called after the TaskSpawner can no longer spawn tasks,
+/// such as when the TaskSpawner has been closed 
+/// or the associated TaskQueue has been aborted or cancelled.
+/// 
 /// Note that [TaskQueue::join()](TaskQueue::join) and [TaskQueue::try_join()](TaskQueue::try_join) do not complete as long as any TaskSpawner remains alive.
 /// To allow it to complete, 
 /// either drop all TaskSpawners, call [close()](TaskSpawner::close) on all TaskSpawners,
@@ -95,21 +101,15 @@ impl<S> TaskSpawner<S> {
 
 impl<S: Send + 'static> TaskSpawner<S> {
 
-    /// Queues an asynchronous task for sequential execution, 
+    /// Queues an asynchronous task for sequential execution
+    /// on the associated [TaskQueue], 
     /// returning a [TaskHandle] to wait for it to complete.
     /// 
-    /// The task is executed after all previously queued tasks have completed.
-    /// Tasks are executed sequentially in the order they are queued,
-    /// regardless of whether they are asynchronous or blocking.
-    ///
     /// This method is equivalent to [TaskQueue::spawn()](TaskQueue::spawn),
     /// except that this method returns a TaskHandle that immediately resolves to an error
     /// if it is called after this TaskSpawner can no longer spawn tasks,
     /// such as when the TaskSpawner has been closed
     /// or the associated [TaskQueue] has been aborted or cancelled.
-    /// 
-    /// # Panics
-    /// Panics if this method is called outside Tokio runtime.
     pub fn spawn<T, R>(&self, task: T) -> TaskHandle<R>
     where
         T: for<'a> FnOnce(&'a mut S) -> Pin<Box<dyn Future<Output = R> + Send + 'a>> + Send + 'static,
@@ -129,24 +129,18 @@ impl<S: Send + 'static> TaskSpawner<S> {
         }
     }
 
-    /// Queues a blocking task for sequential execution, 
+    /// Queues a blocking task for sequential execution
+    /// on the associated [TaskQueue],
     /// returning a [TaskHandle] to wait for it to complete.
-    ///
-    /// The task is executed after all previously queued tasks have completed.
-    /// Tasks are executed sequentially in the order they are queued,
-    /// regardless of whether they are asynchronous or blocking.
     /// 
     /// The blocking task is executed using [Tokio's blocking thread pool](https://docs.rs/tokio/latest/tokio/task/fn.spawn_blocking.html)
     /// to avoid blocking the asynchronous runtime.
     /// 
     /// This method is equivalent to [TaskQueue::spawn_blocking()](TaskQueue::spawn_blocking),
-    /// except that this method returns a TaskHandle that immediately resolves to an error
+    /// except that this returns a TaskHandle that immediately resolves to an error
     /// if it is called after this TaskSpawner can no longer spawn tasks,
     /// such as when the TaskSpawner has been closed
     /// or the associated [TaskQueue] has been aborted or cancelled.
-    /// 
-    /// # Panics
-    /// Panics if this method is called outside Tokio runtime.
     pub fn spawn_blocking<T, R>(&self, task: T) -> TaskHandle<R>
     where
         T: (FnOnce(&mut S) -> R) + Send + 'static,

@@ -571,6 +571,25 @@ mod tests3 {
         assert!(queue.has_panicked());
         assert!(r.unwrap_err().kind().is_task_panic());
     }
+
+    #[tokio::test]
+    async fn test_spawner_on_outside_tokio_context() {
+        let queue = TaskQueue::default();
+        let spawner = queue.spawner();
+        
+        std::thread::spawn(move || {
+            assert!(tokio::runtime::Handle::try_current().unwrap_err().is_missing_context());
+
+            spawner.spawn(|s: &mut Vec<_>| Box::pin(async {
+                s.push(0);
+            }));
+            spawner.spawn_blocking(|s: &mut Vec<_>| {
+                s.push(1);
+            });
+        }).join().unwrap();
+
+        assert_eq!(queue.join().await, vec![0, 1]);
+    }
 }
 
 #[cfg(test)]

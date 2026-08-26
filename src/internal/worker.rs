@@ -43,9 +43,7 @@ pub fn spawn_worker<S: Send + 'static>(state: S) -> WorkerHandle<S> {
     let join_handle = {
         let worker_state = Arc::clone(&worker_state);
         spawn(async move {
-            let result = worker_join_handle.await;
-            worker_state.set_finalize_started();
-            match result {
+            match worker_join_handle.await {
                 Ok(state) => Ok(state),
                 Err(e) => {
                     let mut task_panic_msg = None;
@@ -339,10 +337,6 @@ impl WorkerState {
         self.set_flag(Self::FLAG_CANCEL_STARTED);
     }
 
-    fn set_finalize_started(&self) {
-        self.set_flag(Self::FLAG_FINALIZE_STARTED);
-    }
-
     /// 既にセットされている場合はセットせず与えられた値をそのまま返す
     fn set_task_panic_msg(
         &self,
@@ -355,7 +349,6 @@ impl WorkerState {
 
     const FLAG_ABORT_STARTED: u8 = 0b0000_0001;
     const FLAG_CANCEL_STARTED: u8 = 0b0000_0010;
-    const FLAG_FINALIZE_STARTED: u8 = 0b0000_0100;
 
     fn set_flag(&self, flag: u8) {
         self.flags.fetch_or(flag, Ordering::Release);
@@ -378,10 +371,6 @@ impl WorkerFlagsSnapshot {
 
     pub fn has_cancel_started(&self) -> bool {
         self.flags & WorkerState::FLAG_CANCEL_STARTED != 0
-    }
-
-    pub fn has_finalize_started(&self) -> bool {
-        self.flags & WorkerState::FLAG_FINALIZE_STARTED != 0
     }
 }
 

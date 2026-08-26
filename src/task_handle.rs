@@ -113,7 +113,7 @@ impl<R> TaskHandle<R> {
             Repr::Unspawned(_) | Repr::ScopedNoncancellableTask { .. } => false,
             Repr::CancellableTask { task_canceller, worker_state, .. } => {
                 let f = worker_state.flags();
-                if f.has_finalize_started() || f.has_abort_started() || f.has_cancel_started() {
+                if f.has_abort_started() || f.has_cancel_started() {
                     false
                 }
                 else {
@@ -160,7 +160,7 @@ impl<R> TaskHandle<R> {
 
                 TaskCanceller::new(Arc::new(move || {
                     let f = worker_state.flags();
-                    if f.has_finalize_started() || f.has_abort_started() || f.has_cancel_started() {
+                    if f.has_abort_started() || f.has_cancel_started() {
                         false
                     }
                     else {

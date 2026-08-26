@@ -6,21 +6,25 @@ use std::{future::Future, pin::Pin, sync::{Arc, Mutex as SyncMutex}};
 /// and blocking tasks sequentially on a shared mutable state,
 /// allowing the final state to be obtained after all tasks complete.
 /// 
-/// Tasks are executed on executed sequentially in the order they are queued,
+/// Tasks are executed sequentially in the order they are queued,
 /// regardless of whether they are asynchronous or blocking.
-/// 
-/// This TaskQueue does not provide an async runtime or its own thread pool. 
-/// Tasks are executed on Tokio async runtime.
-/// The blocking task is executed using [Tokio's blocking thread pool](https://docs.rs/tokio/latest/tokio/task/fn.spawn_blocking.html)
-/// to avoid blocking the asynchronous runtime.
 /// 
 /// If a task panics, subsequent tasks also panic because the state invariants
 /// may have been violated by the task's panic.
 /// 
-/// When the TaskQueue is dropped, all tasks in the TaskQueue are immediately aborted.
+/// When this TaskQueue is dropped, all tasks in the TaskQueue are immediately aborted.
 /// Note that blocking tasks are not asynchronous, so if one is already running,
 /// aborting it only detaches the task from the TaskQueue; 
 /// it continues running normally.
+/// 
+/// # Worker
+/// This TaskQueue does not provide an async runtime or its own thread pool.
+/// 
+/// The worker is started lazily and only once, 
+/// when a task is queued or a [TaskSpawner] is created.
+/// The worker runs as a single Tokio task spawned using [tokio::task::spawn()](https://docs.rs/tokio/latest/tokio/task/fn.spawn.html).
+/// Blocking tasks are executed on the worker
+/// by wrapping them in [tokio::task::spawn_blocking()](https://docs.rs/tokio/latest/tokio/task/fn.spawn_blocking.html).
 /// 
 /// # Examples
 /// ```
@@ -36,7 +40,8 @@ use std::{future::Future, pin::Pin, sync::{Arc, Mutex as SyncMutex}};
 ///     state.push(1);
 /// }));
 ///
-/// // A spawner can be used to spawn tasks from another thread or asynchronous task.
+/// // A spawner can be used to spawn tasks onto the queue
+/// // from another thread or Tokio task.
 /// let spawner = queue.spawner();
 /// tokio::spawn(async move {
 ///     let task_handle1 = spawner.spawn_blocking(move |state| {
@@ -53,7 +58,7 @@ use std::{future::Future, pin::Pin, sync::{Arc, Mutex as SyncMutex}};
 ///     assert_eq!(task_handle1.await.unwrap(), "hello");
 ///     assert_eq!(task_handle2.await.unwrap(), "world");
 /// 
-///     // Ensure the spawner to drop to allow `join()` to complete.
+///     // Drop the spawner to allow `join()` to complete.
 ///     drop(spawner);
 /// });
 ///
@@ -98,8 +103,7 @@ impl<S> TaskQueue<S> {
     /// or call [close_spawners()](TaskQueue::close_spawners) beforehand.
     /// 
     /// # Panics
-    /// Panics if any task panicked before or during this method,
-    /// or if this method is called outside Tokio runtime.
+    /// Panics if any task panicked before or during this method.
     pub async fn join(self) -> S {
         self.try_join().await.unwrap_or_else(|e| e.panic())
     }
@@ -114,9 +118,6 @@ impl<S> TaskQueue<S> {
     /// 
     /// # Errors
     /// Returns an error if any task panicked before or during this method.
-    /// 
-    /// # Panics
-    /// Panics if this method is called outside Tokio runtime.
     pub async fn try_join(self) -> Result<S, TaskQueueJoinError> {
         let worker = self.worker.lock().unwrap().take();
         match worker {
@@ -175,8 +176,7 @@ impl<S> TaskQueue<S> {
     /// This method **does not abort a running task** to preserve the state invariant.
     /// 
     /// # Panics
-    /// Panics if any task panicked before or during this method,
-    /// or if this method is called outside Tokio runtime.
+    /// Panics if any task panicked before or during this method.
     pub async fn cancel_and_join(self) -> S {
         self.cancel_and_try_join().await.unwrap_or_else(|e| e.panic())
     }
@@ -189,9 +189,6 @@ impl<S> TaskQueue<S> {
     /// 
     /// # Errors
     /// Returns an error if any task panicked before or during this method.
-    /// 
-    /// # Panics
-    /// Panics if this method is called outside Tokio runtime.
     pub async fn cancel_and_try_join(self) -> Result<S, TaskQueueJoinError> {
         let worker = self.worker.lock().unwrap().take();
         match worker {
@@ -245,13 +242,19 @@ impl<S: Send + 'static> TaskQueue<S> {
 
     /// Returns a [TaskSpawner] for queuing tasks onto this TaskQueue.
     /// 
+    /// The TaskSpawner provides methods equivalent to [spawn()](TaskQueue::spawn) and [spawn_blocking()](TaskQueue::spawn_blocking), 
+    /// but they return a [TaskHandle] that immediately resolves to an error
+    /// if they are called after the TaskSpawner can no longer spawn tasks,
+    /// such as when the TaskSpawner has been closed 
+    /// or this TaskQueue has been aborted or cancelled.
+    /// 
     /// Note that [join()](TaskQueue::join) and [try_join()](TaskQueue::try_join) do not complete as long as any TaskSpawner remains alive.
     /// To allow it to complete, 
     /// either drop all TaskSpawners, call [TaskSpawner::close()](TaskSpawner::close) on all TaskSpawners,
     /// or call [close_spawners()](TaskQueue::close_spawners) beforehand.
     /// 
     /// # Panics
-    /// Panics if this method is called outside Tokio runtime.
+    /// Panics if this method is called outside a Tokio runtime.
     /// 
     /// # Examples
     /// ```
@@ -275,12 +278,8 @@ impl<S: Send + 'static> TaskQueue<S> {
     /// Queues an asynchronous task for sequential execution, 
     /// returning a [TaskHandle] to wait for it to complete.
     /// 
-    /// The task is executed after all previously queued tasks have completed.
-    /// Tasks are executed sequentially in the order they are queued,
-    /// regardless of whether they are asynchronous or blocking.
-    /// 
     /// # Panics
-    /// Panics if this method is called outside Tokio runtime.
+    /// Panics if this method is called outside a Tokio runtime.
     /// 
     /// # Examples
     /// ```
@@ -313,15 +312,11 @@ impl<S: Send + 'static> TaskQueue<S> {
     /// Queues a blocking task for sequential execution, 
     /// returning a [TaskHandle] to wait for it to complete.
     ///
-    /// The task is executed after all previously queued tasks have completed.
-    /// Tasks are executed sequentially in the order they are queued,
-    /// regardless of whether they are asynchronous or blocking.
-    /// 
     /// The blocking task is executed using [Tokio's blocking thread pool](https://docs.rs/tokio/latest/tokio/task/fn.spawn_blocking.html)
     /// to avoid blocking the asynchronous runtime.
     /// 
     /// # Panics
-    /// Panics if this method is called outside Tokio runtime.
+    /// Panics if this method is called outside a Tokio runtime.
     /// 
     /// # Examples
     /// ```
@@ -352,10 +347,6 @@ impl<S: Send + 'static> TaskQueue<S> {
     }
 
     /// Queues an asynchronous task for sequential execution and waits for it to complete.
-    /// 
-    /// The task is executed after all previously queued tasks have completed.
-    /// Tasks are executed sequentially in the order they are queued,
-    /// regardless of whether they are asynchronous or blocking.
     /// 
     /// This is a convenient wrapper around [spawn()](TaskQueue::spawn).
     /// 
@@ -393,10 +384,6 @@ impl<S: Send + 'static> TaskQueue<S> {
     }
 
     /// Queues a blocking task for sequential execution and waits for it to complete.
-    /// 
-    /// The task is executed after all previously queued tasks have completed.
-    /// Tasks are executed sequentially in the order they are queued,
-    /// regardless of whether they are asynchronous or blocking.
     /// 
     /// The blocking task is executed using [Tokio's blocking thread pool](https://docs.rs/tokio/latest/tokio/task/fn.spawn_blocking.html)
     /// to avoid blocking the asynchronous runtime.

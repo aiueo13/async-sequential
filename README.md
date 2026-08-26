@@ -22,7 +22,8 @@ async fn main() {
         state.push(1);
     }));
 
-    // A spawner can be used to spawn tasks from another thread or asynchronous task.
+    // A spawner can be used to spawn tasks onto the queue
+    // from another thread or Tokio task.
     let spawner = queue.spawner();
     tokio::spawn(async move {
         let task_handle1 = spawner.spawn_blocking(move |state| {
@@ -39,7 +40,7 @@ async fn main() {
         assert_eq!(task_handle1.await.unwrap(), "hello");
         assert_eq!(task_handle2.await.unwrap(), "world");
 
-        // Ensure the spawner to drop to allow `join()` to complete.
+        // Drop the spawner to allow `join()` to complete.
         drop(spawner);
     });
 
