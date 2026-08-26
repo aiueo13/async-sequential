@@ -64,7 +64,7 @@ mod tests {
 
     #[allow(unused)]
     fn assert_cannceller_impl_refunwindsafe_unwindsafe() {
-        let queue = JoinQueue::new(());
+        let queue = TaskQueue::new(());
         let task_handle = queue.spawn(|_| Box::pin(async {}));
         let task_canceller = task_handle.canceller();
         require_send_static_unpin_unwindsafe(task_canceller);

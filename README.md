@@ -14,7 +14,7 @@ use tokio::time::sleep;
 
 #[tokio::main]
 async fn main() {
-    let queue = async_sequential::JoinQueue::new(Vec::new());
+    let queue = async_sequential::TaskQueue::new(Vec::new());
 
     // Tasks are executed in the order in which they are spawned.
     queue.spawn(move |state: &mut Vec<u64>| Box::pin(async move {

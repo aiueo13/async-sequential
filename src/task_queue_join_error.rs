@@ -2,12 +2,12 @@ use crate::*;
 use std::{fmt, panic};
 
 
-/// An error that occurred while waiting for a [JoinQueue] to complete.
-pub struct QueueJoinError {
+/// An error that occurred while waiting for a [TaskQueue] to complete.
+pub struct TaskQueueJoinError {
     repr: internal::WorkerJoinError
 }
 
-impl QueueJoinError {
+impl TaskQueueJoinError {
 
     pub(crate) fn panic(self) -> ! {
         match self.repr.into_panic_msg() {
@@ -17,23 +17,23 @@ impl QueueJoinError {
     }
 }
 
-impl From<internal::WorkerJoinError> for QueueJoinError {
+impl From<internal::WorkerJoinError> for TaskQueueJoinError {
 
     fn from(value: internal::WorkerJoinError) -> Self {
         Self { repr: value }
     }
 }
 
-impl fmt::Debug for QueueJoinError {
+impl fmt::Debug for TaskQueueJoinError {
 
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("QueueJoinError")
+        f.debug_struct("TaskQueueJoinError")
             .field("panic_msg", &self.repr.panic_msg())
             .finish()
     }
 }
 
-impl fmt::Display for QueueJoinError {
+impl fmt::Display for TaskQueueJoinError {
 
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self.repr.panic_msg() {
@@ -43,11 +43,11 @@ impl fmt::Display for QueueJoinError {
     }
 }
 
-impl std::error::Error for QueueJoinError {}
+impl std::error::Error for TaskQueueJoinError {}
 
-impl From<QueueJoinError> for std::io::Error {
+impl From<TaskQueueJoinError> for std::io::Error {
 
-    fn from(value: QueueJoinError) -> std::io::Error {
+    fn from(value: TaskQueueJoinError) -> std::io::Error {
         std::io::Error::other(value)
     }
 }

@@ -76,7 +76,7 @@ impl<R> TaskHandle<R> {
     /// use std::time::Duration;
     /// use tokio::time::sleep;
     /// 
-    /// let queue = async_sequential::JoinQueue::new(());
+    /// let queue = async_sequential::TaskQueue::new(());
     /// 
     /// // The task is not cancelled
     /// // when the handle cancels it while it is running.
@@ -97,7 +97,7 @@ impl<R> TaskHandle<R> {
     /// assert!(handle.await.unwrap_err().is_cancelled());
     /// 
     /// // The task is cancelled but `cancel` returns false
-    /// // because the JoinQueue is dropped before `cancel` is called and aborts the task.
+    /// // because the TaskQueue is dropped before `cancel` is called and aborts the task.
     /// let handle = queue.spawn(move |_| Box::pin(async move {
     ///     sleep(Duration::from_secs(2)).await;
     /// }));
@@ -136,7 +136,7 @@ impl<R> TaskHandle<R> {
     /// use std::time::Duration;
     /// use tokio::time::sleep;
     ///
-    /// let queue = async_sequential::JoinQueue::new(());
+    /// let queue = async_sequential::TaskQueue::new(());
     ///
     /// let handle = queue.spawn(move |_| Box::pin(async move {
     ///     sleep(Duration::from_secs(1)).await;
@@ -181,33 +181,6 @@ impl<R> Future for TaskHandle<R> {
     ) -> Poll<Self::Output> {
 
         match &mut self.repr {
-            Repr::Unspawned(inactive) => {
-                match inactive {
-                    UnspawnedReason::WorkerTaskSenderUnavailable => {
-                        Poll::Ready(Err(TaskError::worker_task_sender_unavailable()))
-                    },
-                    UnspawnedReason::PrevTaskPanic { panic_msg } => {
-                        Poll::Ready(Err(TaskError::prev_task_panicked(panic_msg.take())))
-                    }
-                }
-            },
-            // このタスクが実行中は Worker が abort も cancel もされず、
-            // タスクのキャンセルも行われることはない。
-            Repr::ScopedNoncancellableTask { task_result, worker_state } => {
-                match Pin::new(task_result).poll(cx) {
-                    Poll::Ready(result) => {
-                        match result {
-                            Ok(value) => Poll::Ready(Ok(value)),
-                            Err(Some(panic)) => Poll::Ready(Err(TaskError::task_panicked(panic))),
-                            Err(None) => {
-                                let panic_msg = worker_state.task_panic_msg();
-                                Poll::Ready(Err(TaskError::prev_task_panicked(panic_msg)))
-                            },
-                        }
-                    },
-                    Poll::Pending => Poll::Pending
-                }
-            },
             Repr::CancellableTask { task_result, task_canceller, worker_state } => {
                 match Pin::new(task_result).poll(cx) {
                     Poll::Ready(result) => {
@@ -246,6 +219,33 @@ impl<R> Future for TaskHandle<R> {
                         }
 
                         Poll::Pending
+                    }
+                }
+            },
+            // このタスクが実行中は Worker が abort も cancel もされず、
+            // タスクのキャンセルも行われることはない。
+            Repr::ScopedNoncancellableTask { task_result, worker_state } => {
+                match Pin::new(task_result).poll(cx) {
+                    Poll::Ready(result) => {
+                        match result {
+                            Ok(value) => Poll::Ready(Ok(value)),
+                            Err(Some(panic)) => Poll::Ready(Err(TaskError::task_panicked(panic))),
+                            Err(None) => {
+                                let panic_msg = worker_state.task_panic_msg();
+                                Poll::Ready(Err(TaskError::prev_task_panicked(panic_msg)))
+                            },
+                        }
+                    },
+                    Poll::Pending => Poll::Pending
+                }
+            },
+            Repr::Unspawned(reason) => {
+                match reason {
+                    UnspawnedReason::WorkerTaskSenderUnavailable => {
+                        Poll::Ready(Err(TaskError::worker_task_sender_unavailable()))
+                    },
+                    UnspawnedReason::PrevTaskPanic { panic_msg } => {
+                        Poll::Ready(Err(TaskError::prev_task_panicked(panic_msg.take())))
                     }
                 }
             },

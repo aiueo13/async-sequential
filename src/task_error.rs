@@ -151,39 +151,6 @@ impl TaskError {
     }
 }
 
-impl TaskError {
-    
-    #[deprecated = "use `kind().is_task_panic()` instead"]
-    pub fn is_task_panic(&self) -> bool {
-        self.kind().is_task_panic()
-    }
-
-    #[deprecated = "use `kind().is_previous_task_panic()` instead"]
-    pub fn is_prev_task_panic(&self) -> bool {
-        self.kind().is_previous_task_panic()
-    }
-
-    #[deprecated = "use `kind().is_queue_aborted()` instead"]
-    pub fn is_queue_aborted(&self) -> bool {
-        self.kind().is_queue_aborted()
-    }
-
-    #[deprecated = "use `kind().is_queue_cancelled()` instead"]
-    pub fn is_queue_cancelled(&self) -> bool {
-        self.kind().is_queue_cancelled()
-    }
-
-    #[deprecated = "use `kind().is_task_spawner_unavailable()` instead"]
-    pub fn is_task_spawner_unavailable(&self) -> bool {
-        self.kind().is_task_spawner_unavailable()
-    }
-
-    #[deprecated = "use `kind().is_task_cancelled()` instead"]
-    pub fn is_task_cancelled(&self) -> bool {
-        self.kind().is_task_cancelled()
-    }
-}
-
 impl fmt::Debug for TaskError {
 
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -244,12 +211,12 @@ impl From<TaskError> for std::io::Error {
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
 pub enum TaskErrorKind {
 
-    /// The error was caused by the [JoinQueue](crate::JoinQueue) being aborted.
+    /// The error was caused by the [TaskQueue](crate::TaskQueue) being aborted.
     ///
     /// See [is_queue_aborted()](Self::is_queue_aborted) for details.
     QueueAborted,
 
-    /// The error was caused by the [JoinQueue](crate::JoinQueue) being cancelled.
+    /// The error was caused by the [TaskQueue](crate::TaskQueue) being cancelled.
     ///
     /// See [is_queue_cancelled()](Self::is_queue_cancelled) for details.
     QueueCancelled,
@@ -278,10 +245,10 @@ pub enum TaskErrorKind {
 
 impl TaskErrorKind {
 
-    /// Returns true if the error was caused by the [JoinQueue](crate::JoinQueue) being aborted.
+    /// Returns true if the error was caused by the [TaskQueue](crate::TaskQueue) being aborted.
     ///
     /// Note that blocking tasks are not asynchronous, so if one is already running,
-    /// aborting it only detaches the task from the JoinQueue;
+    /// aborting it only detaches the task from the TaskQueue;
     /// it continues running normally.
     /// In this case, its [TaskHandle](crate::TaskHandle) does not return this error.
     ///
@@ -289,7 +256,7 @@ impl TaskErrorKind {
     /// ```
     /// # fn main() {
     /// # tokio_test::block_on(async {
-    /// let queue = async_sequential::JoinQueue::new(());
+    /// let queue = async_sequential::TaskQueue::new(());
     ///
     /// let running = queue.spawn(move |_| Box::pin(async move {
     ///     // Never completes
@@ -298,7 +265,7 @@ impl TaskErrorKind {
     /// drop(queue);
     ///
     /// // The task was aborted
-    /// // because the JoinQueue was dropped before the task completed.
+    /// // because the TaskQueue was dropped before the task completed.
     /// let err = running.await.unwrap_err();
     /// assert!(err.is_cancelled());
     /// assert!(err.kind().is_queue_aborted());
@@ -312,7 +279,7 @@ impl TaskErrorKind {
     /// use std::{time::Duration, thread};
     /// use tokio::time::sleep;
     /// 
-    /// let queue = async_sequential::JoinQueue::new(());
+    /// let queue = async_sequential::TaskQueue::new(());
     /// 
     /// let running = queue.spawn_blocking(move |_| {
     ///     thread::sleep(Duration::from_secs(2));
@@ -345,15 +312,15 @@ impl TaskErrorKind {
         matches!(self, TaskErrorKind::QueueAborted)
     }
 
-    /// Returns true if the error was caused by the [JoinQueue](crate::JoinQueue) being cancelled.
+    /// Returns true if the error was caused by the [TaskQueue](crate::TaskQueue) being cancelled.
     ///
-    /// This occurs when the task is cancelled as a result of [JoinQueue::cancel()](crate::JoinQueue::cancel) being called.
+    /// This occurs when the task is cancelled as a result of [TaskQueue::cancel()](crate::TaskQueue::cancel) being called.
     ///
     /// # Examples
     /// ```
     /// # fn main() {
     /// # tokio_test::block_on(async {
-    /// let queue = async_sequential::JoinQueue::new(());
+    /// let queue = async_sequential::TaskQueue::new(());
     ///
     /// let _running = queue.spawn(move |_| Box::pin(async move {
     ///     // Never completes
@@ -366,7 +333,7 @@ impl TaskErrorKind {
     /// queue.cancel();
     ///
     /// // The task was cancelled
-    /// // by the JoinQueue before it started.
+    /// // by the TaskQueue before it started.
     /// let err = queued.await.unwrap_err();
     /// assert!(err.is_cancelled());
     /// assert!(err.kind().is_queue_cancelled());
@@ -381,8 +348,8 @@ impl TaskErrorKind {
     /// after the [TaskSpawner](crate::TaskSpawner) could no longer spawn tasks.
     ///
     /// This occurs when the task is cancelled before the task is spawned by the TaskSpawner as a result of any of the following:
-    /// - [JoinQueue](crate::JoinQueue) being aborted before spawning tasks.
-    /// - JoinQueue being cancelled before spawning tasks.
+    /// - [TaskQueue](crate::TaskQueue) being aborted before spawning tasks.
+    /// - TaskQueue being cancelled before spawning tasks.
     /// - TaskSpawner being closed before spawning tasks.
     ///
     /// # Examples
@@ -392,7 +359,7 @@ impl TaskErrorKind {
     /// use tokio::{task::spawn, time::sleep};
     /// use std::time::Duration;
     ///
-    /// let queue = async_sequential::JoinQueue::new(());
+    /// let queue = async_sequential::TaskQueue::new(());
     ///
     /// let _ = queue.spawn(move |_| Box::pin(async move {
     ///     sleep(Duration::from_secs(2)).await;
@@ -432,7 +399,7 @@ impl TaskErrorKind {
     /// ```
     /// # fn main() {
     /// # tokio_test::block_on(async {
-    /// let queue = async_sequential::JoinQueue::new(());
+    /// let queue = async_sequential::TaskQueue::new(());
     ///
     /// let _running = queue.spawn(move |_| Box::pin(async move {
     ///     // Never completes
@@ -462,7 +429,7 @@ impl TaskErrorKind {
     /// ```
     /// # fn main() {
     /// # tokio_test::block_on(async {
-    /// let queue = async_sequential::JoinQueue::new(());
+    /// let queue = async_sequential::TaskQueue::new(());
     ///
     /// // Task panic
     /// let handle = queue.spawn(move |_| Box::pin(async move {
@@ -484,7 +451,7 @@ impl TaskErrorKind {
     /// ```
     /// # fn main() {
     /// # tokio_test::block_on(async {
-    /// let queue = async_sequential::JoinQueue::new(());
+    /// let queue = async_sequential::TaskQueue::new(());
     ///
     /// // Task panic
     /// let handle = queue.spawn(move |_| Box::pin(async move {

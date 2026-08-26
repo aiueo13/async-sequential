@@ -1,13 +1,13 @@
 mod internal;
-mod join_queue;
-mod queue_join_error;
+mod task_queue;
+mod task_queue_join_error;
 mod task_canceller;
 mod task_error;
 mod task_handle;
 mod task_spawner;
 
-pub use join_queue::JoinQueue;
-pub use queue_join_error::QueueJoinError;
+pub use task_queue::TaskQueue;
+pub use task_queue_join_error::TaskQueueJoinError;
 pub use task_spawner::TaskSpawner;
 pub use task_canceller::TaskCanceller;
 pub use task_error::{TaskError, TaskErrorKind};
@@ -21,7 +21,7 @@ mod test_readme {
 
     #[tokio::test]
     async fn test() {
-        let queue = async_sequential::JoinQueue::new(Vec::new());
+        let queue = async_sequential::TaskQueue::new(Vec::new());
 
         // Tasks are executed in the order in which they are spawned.
         queue.spawn(move |state: &mut Vec<u64>| Box::pin(async move {
@@ -65,7 +65,7 @@ mod tests3 {
 
     #[tokio::test]
     async fn test_completed() {
-        let queue = JoinQueue::new(());
+        let queue = TaskQueue::new(());
         let (tx, rx) = oneshot::channel();
 
         let handle = queue.spawn(|_| Box::pin(async {
@@ -79,7 +79,7 @@ mod tests3 {
 
     #[tokio::test]
     async fn test_finished_after_completion() {
-        let queue = JoinQueue::new(());
+        let queue = TaskQueue::new(());
 
         let handle = queue.spawn(|_| Box::pin(async {
             42
@@ -92,7 +92,7 @@ mod tests3 {
 
     #[tokio::test]
     async fn test_cancel_queued_task() {
-        let queue = JoinQueue::new(());
+        let queue = TaskQueue::new(());
         let (tx, rx) = oneshot::channel();
 
         let running = queue.spawn(|_| Box::pin(async {
@@ -113,7 +113,7 @@ mod tests3 {
 
     #[tokio::test]
     async fn test_cancel_running_task_returns_false() {
-        let queue = JoinQueue::new(());
+        let queue = TaskQueue::new(());
         let (tx, rx) = oneshot::channel();
         let (tx2, rx2) = oneshot::channel();
 
@@ -132,7 +132,7 @@ mod tests3 {
 
     #[tokio::test]
     async fn test_cancel_twice() {
-        let queue = JoinQueue::new(());
+        let queue = TaskQueue::new(());
         let (tx, rx) = oneshot::channel();
 
         let running = queue.spawn(|_| Box::pin(async {
@@ -153,7 +153,7 @@ mod tests3 {
 
     #[tokio::test]
     async fn test_queue_drop() {
-        let queue = JoinQueue::new(());
+        let queue = TaskQueue::new(());
         let (tx, rx) = oneshot::channel();
         let (tx2, rx2) = oneshot::channel();
 
@@ -176,7 +176,7 @@ mod tests3 {
 
     #[tokio::test]
     async fn test_task_panic() {
-        let queue = JoinQueue::new(());
+        let queue = TaskQueue::new(());
 
         let handle = queue.spawn(|_| Box::pin(async {
             panic!("task panic");
@@ -188,7 +188,7 @@ mod tests3 {
 
     #[tokio::test]
     async fn test_prev_task_panic() {
-        let queue = JoinQueue::new(());
+        let queue = TaskQueue::new(());
 
         let first = queue.spawn(|_| Box::pin(async {
             panic!("first task panic");
@@ -207,7 +207,7 @@ mod tests3 {
 
     #[tokio::test]
     async fn test_is_finished_while_running() {
-        let queue = JoinQueue::new(());
+        let queue = TaskQueue::new(());
         let (tx, rx) = oneshot::channel();
         let (tx2, rx2) = oneshot::channel();
 
@@ -225,7 +225,7 @@ mod tests3 {
     async fn test_cancel_queued_task_does_not_run() {
         use std::sync::atomic::{AtomicBool, Ordering};
 
-        let queue = JoinQueue::new(());
+        let queue = TaskQueue::new(());
         let (tx, rx) = oneshot::channel();
 
         let running = queue.spawn(|_| Box::pin(async {
@@ -250,7 +250,7 @@ mod tests3 {
 
     #[tokio::test]
     async fn test_panic_before_queue_drop() {
-        let queue = JoinQueue::new(());
+        let queue = TaskQueue::new(());
 
         let handle = queue.spawn(|_| Box::pin(async {
             panic!()
@@ -266,7 +266,7 @@ mod tests3 {
 
     #[tokio::test]
     async fn test_panic_after_queue_drop() {
-        let queue = JoinQueue::new(());
+        let queue = TaskQueue::new(());
         let (tx, rx) = oneshot::channel();
 
         let handle = queue.spawn(|_| Box::pin(async {
@@ -283,7 +283,7 @@ mod tests3 {
 
     #[tokio::test]
     async fn test_resolve_task_handle_after_cancel() {
-        let queue = JoinQueue::new(());
+        let queue = TaskQueue::new(());
         let (tx, rx) = oneshot::channel();
     
         queue.spawn(move |_| Box::pin(async {
@@ -302,7 +302,7 @@ mod tests3 {
 
     #[tokio::test]
     async fn test_resolve_task_handle_after_queue_aborted() {
-        let queue = JoinQueue::new(());
+        let queue = TaskQueue::new(());
         let (tx, rx) = oneshot::channel();
 
         let handle1 = queue.spawn(move |_| Box::pin(async {
@@ -324,7 +324,7 @@ mod tests3 {
 
     #[tokio::test]
     async fn test_resolve_task_handle_after_queue_canncelled() {
-        let queue = JoinQueue::new(Vec::new());
+        let queue = TaskQueue::new(Vec::new());
         let (tx, rx) = oneshot::channel();
         let (tx2, mut rx2) = mpsc::unbounded_channel();
 
@@ -356,7 +356,7 @@ mod tests3 {
 
     #[tokio::test]
     async fn test_cancel_join() {
-        let queue = JoinQueue::new(());
+        let queue = TaskQueue::new(());
         let (tx, rx) = oneshot::channel();
 
         let running = queue.spawn(move |_| Box::pin(async move {
@@ -375,7 +375,7 @@ mod tests3 {
 
     #[tokio::test]
     async fn test_task_panic_err_state() {
-        let queue = JoinQueue::new(());
+        let queue = TaskQueue::new(());
 
         let handle = queue.spawn(move |_| Box::pin(async move {
             panic!();
@@ -396,7 +396,7 @@ mod tests3 {
 
     #[tokio::test]
     async fn test_task_handle_cancel_err_state() {
-        let queue = JoinQueue::new(());
+        let queue = TaskQueue::new(());
         let (tx, rx) = oneshot::channel();
         let _ = queue.spawn(|_| Box::pin(async {
             tx.send(()).unwrap();
@@ -419,7 +419,7 @@ mod tests3 {
 
     #[tokio::test]
     async fn test_task_canceller_cancel_err_state() {
-        let queue = JoinQueue::new(());
+        let queue = TaskQueue::new(());
         let (tx, rx) = oneshot::channel();
         let _ = queue.spawn(|_| Box::pin(async {
             tx.send(()).unwrap();
@@ -442,7 +442,7 @@ mod tests3 {
 
     #[tokio::test]
     async fn test_worker_abort_err_state() {
-        let queue = JoinQueue::new(());
+        let queue = TaskQueue::new(());
         let (tx, rx) = oneshot::channel();
         let _ = queue.spawn(|_| Box::pin(async {
             tx.send(()).unwrap();
@@ -463,7 +463,7 @@ mod tests3 {
 
     #[tokio::test]
     async fn test_worker_cancel_err_state() {
-        let queue = JoinQueue::new(());
+        let queue = TaskQueue::new(());
         let (tx, rx) = oneshot::channel();
         let _ = queue.spawn(|_| Box::pin(async {
             tx.send(()).unwrap();
@@ -484,7 +484,7 @@ mod tests3 {
 
     #[tokio::test]
     async fn test_panic_err_state_after_worker_cancel() {
-        let queue = JoinQueue::new(());
+        let queue = TaskQueue::new(());
         let (tx, rx) = oneshot::channel();
         let _ = queue.spawn(|_| Box::pin(async {
             tx.send(()).unwrap();
@@ -505,7 +505,7 @@ mod tests3 {
 
     #[tokio::test]
     async fn test_execute() {
-        let queue = JoinQueue::new(0);
+        let queue = TaskQueue::new(0);
 
         for _ in 0..10000 {
             queue.execute(|s| Box::pin(async {
@@ -523,21 +523,21 @@ mod tests3 {
     #[tokio::test]
     #[should_panic]
     async fn test_execute_panicked() {
-        let queue = JoinQueue::new(());
+        let queue = TaskQueue::new(());
         queue.execute(|_| Box::pin(async { panic!() })).await;
     }
 
     #[tokio::test]
     #[should_panic]
     async fn test_execute_blocking_panicked() {
-        let queue = JoinQueue::new(());
+        let queue = TaskQueue::new(());
         queue.execute_blocking(|_| { panic!() }).await;
     }
 
     #[tokio::test]
     #[should_panic]
     async fn test_execute_panicked_after_panic() {
-        let queue = JoinQueue::new(());
+        let queue = TaskQueue::new(());
         let h = queue.spawn(|_| Box::pin(async { panic!()}));
         assert!(h.await.unwrap_err().kind().is_task_panic());
         queue.execute(|_| Box::pin(async { })).await;
@@ -546,7 +546,7 @@ mod tests3 {
     #[tokio::test]
     #[should_panic]
     async fn test_execute_blocking_panicked_after_panic() {
-        let queue = JoinQueue::new(());
+        let queue = TaskQueue::new(());
         let h = queue.spawn_blocking(|_| {});
         assert!(h.await.unwrap_err().kind().is_task_panic());
         queue.execute_blocking(|_| {}).await;
@@ -554,7 +554,7 @@ mod tests3 {
 
     #[tokio::test]
     async fn test_executer_panicked() {
-        let queue = JoinQueue::new(());
+        let queue = TaskQueue::new(());
         assert!(!queue.has_panicked());
         let _ = queue.spawn_blocking(|_| { }).await; 
         assert!(!queue.has_panicked());
@@ -563,7 +563,7 @@ mod tests3 {
         assert!(queue.has_panicked());
         assert!(r.unwrap_err().kind().is_task_panic());
 
-        let queue = JoinQueue::new(());
+        let queue = TaskQueue::new(());
         let s = queue.spawner();
         let h = s.spawn_blocking(|_| { panic!() }); 
         let r = h.await;
@@ -581,7 +581,7 @@ mod tests2 {
 
     #[tokio::test]
     async fn test() {
-        let queue = JoinQueue::new(Vec::new());
+        let queue = TaskQueue::new(Vec::new());
 
         queue.spawn(move |state| Box::pin(async move {
             state.push(identity("1").await);
@@ -610,7 +610,7 @@ mod tests2 {
 
     #[tokio::test]
     async fn test0() {
-        let queue = JoinQueue::new(Vec::new());
+        let queue = TaskQueue::new(Vec::new());
 
         queue.spawn(move |state: &mut Vec<u64>| Box::pin(async move {
             state.push(identity(0).await);
@@ -642,7 +642,7 @@ mod tests2 {
 
     #[tokio::test]
     async fn test1() {
-        let queue = JoinQueue::new(Vec::new());
+        let queue = TaskQueue::new(Vec::new());
         let c = 1000;
 
         for i in 0..c {
@@ -659,7 +659,7 @@ mod tests2 {
 
     #[tokio::test]
     async fn test2() {
-        let queue = JoinQueue::new(Vec::new());
+        let queue = TaskQueue::new(Vec::new());
         let c = 1000;
 
         for i in 0..c {
@@ -686,7 +686,7 @@ mod tests2 {
 
     #[tokio::test]
     async fn test3() {
-        let queue = JoinQueue::new(Vec::new());
+        let queue = TaskQueue::new(Vec::new());
         let c = 1000;
 
         for i in 0..c {
@@ -703,19 +703,19 @@ mod tests2 {
 
     #[tokio::test]
     async fn test4() {
-        let queue = JoinQueue::new(vec![0]);
+        let queue = TaskQueue::new(vec![0]);
         assert_eq!(queue.join().await, vec![0]);
     }
 
     #[tokio::test]
     async fn test5() {
-        let queue = JoinQueue::new(vec![0]);
+        let queue = TaskQueue::new(vec![0]);
         assert_eq!(queue.try_join().await.unwrap(), vec![0]);
     }
 
     #[tokio::test]
     async fn test6() {
-        let queue = JoinQueue::new(vec![0]);
+        let queue = TaskQueue::new(vec![0]);
         queue.spawn(|_| Box::pin(async { panic!() }));
         let r = queue.try_join().await;
         assert!(r.as_ref().is_err());
@@ -725,7 +725,7 @@ mod tests2 {
     #[tokio::test]
     async fn test7() {
         {
-            let queue = JoinQueue::new(());
+            let queue = TaskQueue::new(());
         
             let (tx, rx) = oneshot::channel();
             let handle = queue.spawn(move |_| Box::pin(async {
@@ -740,7 +740,7 @@ mod tests2 {
             assert!(r.as_ref().is_err_and(|e| !e.is_panic()));
         }
         {
-            let queue = JoinQueue::new(());
+            let queue = TaskQueue::new(());
         
             let (tx, rx) = oneshot::channel();
             let handle = queue.spawn_blocking(move |_| {
@@ -759,7 +759,7 @@ mod tests2 {
     #[tokio::test]
     async fn test8() {
         {
-            let queue = JoinQueue::new(());
+            let queue = TaskQueue::new(());
         
             let handle = queue.spawn(move |_| Box::pin(async {
                 panic!()
@@ -771,7 +771,7 @@ mod tests2 {
             assert!(r.as_ref().is_err_and(|e| e.kind().is_task_panic()));
         }
         {
-            let queue = JoinQueue::new(());
+            let queue = TaskQueue::new(());
         
             let handle = queue.spawn_blocking(move |_| {
                 panic!("this is a panic message")
@@ -788,7 +788,7 @@ mod tests2 {
     #[tokio::test]
     async fn test9() {
         {
-            let queue = JoinQueue::new(());
+            let queue = TaskQueue::new(());
         
             let (tx, rx) = oneshot::channel();
             let handle = queue.spawn(move |_| Box::pin(async {
@@ -804,7 +804,7 @@ mod tests2 {
             assert!(r.as_ref().is_err_and(|e| !e.is_panic()));
         }
         {
-            let queue = JoinQueue::new(());
+            let queue = TaskQueue::new(());
         
             let (tx, rx) = oneshot::channel();
             let handle = queue.spawn_blocking(move |_| {
@@ -824,7 +824,7 @@ mod tests2 {
     #[tokio::test]
     async fn test10() {
         {
-            let queue = JoinQueue::new(());
+            let queue = TaskQueue::new(());
         
             queue.spawn(move |_| Box::pin(async {
                 panic!()
@@ -838,7 +838,7 @@ mod tests2 {
             assert!(r.as_ref().is_err_and(|e| e.is_panic()));
         }
         {
-            let queue = JoinQueue::new(());
+            let queue = TaskQueue::new(());
         
             queue.spawn_blocking(move |_| {
                 panic!()
@@ -861,7 +861,7 @@ mod tests {
 
     #[tokio::test]
     async fn test1() {
-        let se = JoinQueue::new("0".to_string());
+        let se = TaskQueue::new("0".to_string());
 
         se.spawn_blocking(|ctx| {
             if ctx == "0" {
@@ -886,7 +886,7 @@ mod tests {
 
     #[tokio::test]
     async fn test2() {
-        let se = JoinQueue::new(0);
+        let se = TaskQueue::new(0);
 
         #[allow(unused_must_use)] {
         tokio::join!(
@@ -909,7 +909,7 @@ mod tests {
 
     #[tokio::test]
     async fn test3() {
-        let se = Arc::new(JoinQueue::new(0));
+        let se = Arc::new(TaskQueue::new(0));
 
         let mut set = tokio::task::JoinSet::new();
         let i = 10000;
@@ -933,7 +933,7 @@ mod tests {
 
     #[tokio::test]
     async fn test4() {
-        let se = JoinQueue::new(0);
+        let se = TaskQueue::new(0);
         let result = se.join().await;
         assert_eq!(result, 0)
     }
@@ -941,7 +941,7 @@ mod tests {
     #[tokio::test]
     #[should_panic]
     async fn test6() {
-        let se = JoinQueue::new(Vec::<&'static str>::new());
+        let se = TaskQueue::new(Vec::<&'static str>::new());
 
         se.spawn(|_ctx| Box::pin(async {
             panic!()
@@ -951,7 +951,7 @@ mod tests {
     #[tokio::test]
     #[should_panic]
     async fn test7() {
-        let se = JoinQueue::new(Vec::<&'static str>::new());
+        let se = TaskQueue::new(Vec::<&'static str>::new());
 
         se.spawn_blocking(|_ctx| {
             panic!()
@@ -960,7 +960,7 @@ mod tests {
 
     #[tokio::test]
     async fn test8() {
-        let se = JoinQueue::new(Vec::<&'static str>::new());
+        let se = TaskQueue::new(Vec::<&'static str>::new());
 
         // TaskHandle を待機しないと task で panic しても sumit_blocking は panic しない
         se.spawn_blocking(|_ctx| {
@@ -970,7 +970,7 @@ mod tests {
 
     #[tokio::test]
     async fn test9() {
-        let se = JoinQueue::new(Vec::<&'static str>::new());
+        let se = TaskQueue::new(Vec::<&'static str>::new());
 
         // TaskHandle を待機しないと task で panic しても sumit は panic しない
         se.spawn(|_ctx| Box::pin(async {
@@ -981,7 +981,7 @@ mod tests {
     #[tokio::test]
     #[should_panic]
     async fn test10() {
-        let se = JoinQueue::new(Vec::<&'static str>::new());
+        let se = TaskQueue::new(Vec::<&'static str>::new());
 
         se.spawn_blocking(|_ctx| {
             panic!()
@@ -991,7 +991,7 @@ mod tests {
     #[tokio::test]
     #[should_panic]
     async fn test11() {
-        let se = JoinQueue::new(Vec::<&'static str>::new());
+        let se = TaskQueue::new(Vec::<&'static str>::new());
 
         se.spawn(|_ctx| Box::pin(async {
             panic!()
@@ -1001,7 +1001,7 @@ mod tests {
     #[tokio::test]
     #[should_panic]
     async fn test12() {
-        let se = JoinQueue::new(Vec::<&'static str>::new());
+        let se = TaskQueue::new(Vec::<&'static str>::new());
 
         // task が panic　した場合、その後の task も panic　になる。
 
@@ -1015,7 +1015,7 @@ mod tests {
     #[tokio::test]
     #[should_panic]
     async fn test13() {
-        let se = JoinQueue::new(Vec::<&'static str>::new());
+        let se = TaskQueue::new(Vec::<&'static str>::new());
 
         se.spawn(|_ctx| Box::pin(async {
             panic!()
@@ -1026,7 +1026,7 @@ mod tests {
 
     #[tokio::test]
     async fn test14() {
-        let se = JoinQueue::new(Vec::<u64>::new());
+        let se = TaskQueue::new(Vec::<u64>::new());
         let i = 1000;
 
         for i in 0..i {
@@ -1040,7 +1040,7 @@ mod tests {
 
     #[tokio::test]
     async fn test15() {
-        let se = JoinQueue::new(Vec::<u64>::new());
+        let se = TaskQueue::new(Vec::<u64>::new());
         let s = tokio::sync::Mutex::new(0);
 
         se.spawn(move |ctx| Box::pin(async move {
@@ -1067,7 +1067,7 @@ mod tests {
     #[tokio::test]
     #[should_panic]
     async fn test16() {
-        let se = JoinQueue::new(());
+        let se = TaskQueue::new(());
         let (tx, rx) = tokio::sync::oneshot::channel();
         let handle = se.spawn(|_| Box::pin(async {
             let _ = rx.await;
@@ -1079,7 +1079,7 @@ mod tests {
 
     #[tokio::test]
     async fn test17() {
-        let queue = JoinQueue::new(Vec::<u64>::new());
+        let queue = TaskQueue::new(Vec::<u64>::new());
 
         let handle = queue.spawn(|state| Box::pin(async move {
             state.push(1);
@@ -1094,7 +1094,7 @@ mod tests {
 
     #[tokio::test]
     async fn test18() {
-        let queue = JoinQueue::new(Vec::<&'static str>::new());
+        let queue = TaskQueue::new(Vec::<&'static str>::new());
 
         queue.spawn(|state| Box::pin(async move {
             state.push("async-1");
@@ -1124,7 +1124,7 @@ mod tests {
     #[tokio::test]
     #[should_panic]
     async fn test19() {
-        let queue = JoinQueue::new(());
+        let queue = TaskQueue::new(());
 
         let (started_tx, started_rx) = tokio::sync::oneshot::channel();
 
@@ -1143,7 +1143,7 @@ mod tests {
     #[tokio::test]
     #[should_panic]
     async fn test20() {
-        let queue = JoinQueue::new(Vec::<u64>::new());
+        let queue = TaskQueue::new(Vec::<u64>::new());
 
         let (started_tx, started_rx) = tokio::sync::oneshot::channel();
 
@@ -1166,7 +1166,7 @@ mod tests {
 
     #[tokio::test]
     async fn test21() {
-        let queue = JoinQueue::new(Vec::<u64>::new());
+        let queue = TaskQueue::new(Vec::<u64>::new());
 
         for i in 0..1000 {
             queue.spawn(move |state| Box::pin(async move {
@@ -1181,7 +1181,7 @@ mod tests {
 
     #[tokio::test]
     async fn test22() {
-        let se = JoinQueue::new(0);
+        let se = TaskQueue::new(0);
         let c = 4;
 
         for _ in 0..c {
