@@ -2,7 +2,7 @@ Note: **I’m using a translation tool, so some expressions may be awkward or in
 
 # Overview
 
-Provides a FIFO queue for running asynchronous and blocking tasks sequentially on a shared mutable state, allowing the final state to be obtained after all tasks complete.
+Run asynchronous and blocking tasks sequentially on a shared mutable state, allowing the final state to be obtained after all tasks complete.
 
 This crate requires the `tokio` async runtime.
 
