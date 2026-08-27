@@ -590,6 +590,36 @@ mod tests3 {
 
         assert_eq!(queue.join().await, vec![0, 1]);
     }
+
+    #[tokio::test]
+    async fn test_cancel_after_task_panic() {
+        let queue = TaskQueue::new(());
+        let (tx, rx) = oneshot::channel();
+        let h = queue.spawn(|_| Box::pin(async {
+            tx.send(()).unwrap();
+            sleep(Duration::from_secs(1)).await;
+            panic!()
+        }));
+        rx.await.unwrap();
+
+        assert!(queue.cancel_and_try_join().await.is_err());
+        assert!(h.await.unwrap_err().kind().is_task_panic());
+    }
+
+    #[tokio::test]
+    async fn test_join_after_task_panic() {
+        let queue = TaskQueue::new(());
+        let (tx, rx) = oneshot::channel();
+        let h = queue.spawn(|_| Box::pin(async {
+            tx.send(()).unwrap();
+            sleep(Duration::from_secs(1)).await;
+            panic!()
+        }));
+        rx.await.unwrap();
+
+        assert!(queue.try_join().await.is_err());
+        assert!(h.await.unwrap_err().kind().is_task_panic());
+    }
 }
 
 #[cfg(test)]

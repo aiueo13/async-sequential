@@ -46,36 +46,26 @@ pub fn spawn_worker<S: Send + 'static>(state: S) -> WorkerHandle<S> {
             match worker_join_handle.await {
                 Ok(state) => Ok(state),
                 Err(e) => {
-                    let mut task_panic_msg = None;
-
-                    let worker_flags = worker_state.flags();
-                    let err = if worker_flags.has_cancel_started() {
-                        // 現在の実装ではここに来ることはない。
-                        // cancel は worker を panic　させないためである。
-                        WorkerJoinError::with_msg("worker canncelled")
-                    }
-                    else if worker_flags.has_abort_started() {
-                        // 現在の実装ではここに来ることはあるがこのエラーは使われない。
-                        // abort は join を提供していないためである。
-                        WorkerJoinError::with_msg("worker aborted")
-                    }
-                    else {
-                        if let Some(panic) = e.try_into_panic().ok() {
-                            let panic = PanicPayload::new(panic);
-                            task_panic_msg = panic.msg().map(|s| s.to_string());
-                            if let Some(panic_sender) = panic_sender_rx.take() { 
-                                panic_sender.send(panic);
-                            }
+                    if let Some(panic) = e.try_into_panic().ok() {
+                        let panic = PanicPayload::new(panic);
+                        let task_panic_msg = panic.msg().map(|s| s.to_string());
+                        if let Some(panic_sender) = panic_sender_rx.take() { 
+                            panic_sender.send(panic);
                         }
 
-                        match &task_panic_msg {
-                            Some(task_panic_msg) => WorkerJoinError::with_msg(task_panic_msg.clone()),
-                            None => WorkerJoinError::with_no_msg(),
+                        let _ = worker_state.set_task_panic_msg(
+                            task_panic_msg.as_ref().map(Clone::clone).map(Arc::new)
+                        );
+                        
+                        return match task_panic_msg {
+                            Some(task_panic_msg) => Err(WorkerJoinError::with_msg(task_panic_msg)),
+                            None => Err(WorkerJoinError::with_no_msg()),
                         }
-                    };
+                    }
 
-                    let _ = worker_state.set_task_panic_msg(task_panic_msg.map(Arc::new));
-                    Err(err)
+                    // cancel は worker を中断させないため、原因は abort に限られる。
+                    // ただし、abort は join を提供しないのでこのメッセージが使われることはない。
+                    Err(WorkerJoinError::with_msg("worker aborted"))
                 },
             }
         })
