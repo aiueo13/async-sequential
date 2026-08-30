@@ -163,7 +163,11 @@ impl<R> TaskHandle<R> {
             internal::WorkerFlagSnapshot::AbortStarted => false,
             internal::WorkerFlagSnapshot::CancelStarted => false,
             internal::WorkerFlagSnapshot::TaskPanicked => false,
-            internal::WorkerFlagSnapshot::Other => task_canceller.cancel(),
+            internal::WorkerFlagSnapshot::RunningOrRuntimeShutdown => {
+                // runtime がシャットダウンされていればタスクはすでにキャンセル扱いで完了しているので
+                // cancel() は何も行わず false を返す。
+                task_canceller.cancel()
+            }
         }
     }
 }
@@ -202,7 +206,7 @@ impl<R> Future for TaskHandle<R> {
                                         let panic_msg = worker_status.task_panic_msg();
                                         Poll::Ready(Err(TaskError::prev_task_panicked(panic_msg)))
                                     },
-                                    internal::WorkerFlagSnapshot::Other => {
+                                    internal::WorkerFlagSnapshot::RunningOrRuntimeShutdown => {
                                         Poll::Ready(Err(TaskError::runtime_shutdown()))
                                     },
                                 }
@@ -211,7 +215,7 @@ impl<R> Future for TaskHandle<R> {
                     },
                     Poll::Pending => {
                         // ワーカーがキャンセルされても、実行中のタスクが完了するまで
-                        // 後続のタスクはキャンセルされない。
+                        // 後続のタスクは完了されない。
                         // そのため、ここでタスクをキャンセルしないと、後続のタスクが
                         // 実行中のタスクの完了まで解決されなくなってしまう。
                         if matches!(worker_status.flag(), internal::WorkerFlagSnapshot::CancelStarted) {

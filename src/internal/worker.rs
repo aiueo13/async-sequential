@@ -241,8 +241,10 @@ impl<S> WorkerHandle<S> {
                         let panic_msg = worker_status.task_panic_msg();
                         Err(WorkerJoinError::AnyTaskPanic { panic_msg, poisoned_state })
                     },
-                    // キャンセルは正常終了させるのでここに来た場合は tokio runtime がシャットダウンされたということ。
-                    WorkerFlagSnapshot::Other | WorkerFlagSnapshot::CancelStarted => {
+                    // キャンセルは正常終了させるのでキャンセルが開始されたなのにここに来た場合
+                    // キャンセル完了前に tokio runtime がシャットダウンされたということ。
+                    WorkerFlagSnapshot::CancelStarted |
+                    WorkerFlagSnapshot::RunningOrRuntimeShutdown => {
                         Err(WorkerJoinError::RuntimeShutdown { poisoned_state }) 
                     },
                 }
@@ -279,7 +281,7 @@ impl<S> WorkerHandle<S> {
                         let panic_msg = self.worker_status.task_panic_msg();
                         Err(WorkerSendError::PrevTaskPanic { panic_msg })
                     },
-                    WorkerFlagSnapshot::Other => {
+                    WorkerFlagSnapshot::RunningOrRuntimeShutdown => {
                         Err(WorkerSendError::RuntimeShutdown)
                     },
                     // abort や cancel は self を取るのでここに来ない。
@@ -322,7 +324,7 @@ impl<S> WorkerTaskSender<S> {
             WorkerFlagSnapshot::AbortStarted => None,
             WorkerFlagSnapshot::CancelStarted => None,
             WorkerFlagSnapshot::TaskPanicked => Some(true),
-            WorkerFlagSnapshot::Other => Some(false),
+            WorkerFlagSnapshot::RunningOrRuntimeShutdown => Some(false),
         }
     }
 }
@@ -344,15 +346,14 @@ impl<S: Send + 'static> WorkerTaskSender<S> {
             Ok(_) => Ok(worker_status),
             Err(_) => {
                 match worker_status.flag() {
-                    WorkerFlagSnapshot::AbortStarted |
-                    WorkerFlagSnapshot::CancelStarted => {
+                    WorkerFlagSnapshot::AbortStarted | WorkerFlagSnapshot::CancelStarted => {
                         Err(WorkerSendError::TaskSenderUnavailable)
                     },
                     WorkerFlagSnapshot::TaskPanicked => {
                         let panic_msg = worker_status.task_panic_msg();
                         Err(WorkerSendError::PrevTaskPanic { panic_msg })
                     },
-                    WorkerFlagSnapshot::Other => {
+                    WorkerFlagSnapshot::RunningOrRuntimeShutdown => {
                         Err(WorkerSendError::RuntimeShutdown)
                     },
                 }
@@ -386,7 +387,7 @@ impl WorkerStatus {
     pub fn flag(&self) -> WorkerFlagSnapshot {
         let flags = self.flags.load(Ordering::Acquire);
         match flags {
-            Self::FLAG_OTHER => WorkerFlagSnapshot::Other,
+            Self::FLAG_OTHER => WorkerFlagSnapshot::RunningOrRuntimeShutdown,
             Self::FLAG_ABORT_STARTED => WorkerFlagSnapshot::AbortStarted,
             Self::FLAG_CANCEL_STARTED => WorkerFlagSnapshot::CancelStarted,
             Self::FLAG_TASK_PANICKED => WorkerFlagSnapshot::TaskPanicked,
@@ -437,7 +438,7 @@ pub enum WorkerFlagSnapshot {
     AbortStarted,
     CancelStarted,
     TaskPanicked,
-    Other,
+    RunningOrRuntimeShutdown,
 }
 
 pub enum WorkerJoinError<S> {
