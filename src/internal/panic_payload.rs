@@ -1,4 +1,4 @@
-use std::{any::Any, panic};
+use std::any::Any;
 use sync_wrapper::SyncWrapper;
 
 
@@ -14,10 +14,6 @@ impl PanicPayload {
 
     pub fn msg(&self) -> Option<&str> {
         panic_payload_as_str(&self.repr)
-    }
-
-    pub fn resume_unwind(self) -> ! {
-        panic::resume_unwind(self.repr.into_inner())
     }
 
     pub fn into_inner(self) -> Box<dyn Any + Send + 'static> {

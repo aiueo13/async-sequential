@@ -6,19 +6,17 @@ use std::{pin::Pin, sync::Arc, task::Poll};
 ///
 /// Awaiting the handle returns the task's result if the task completes successfully,
 /// or a [TaskError] if the task could not complete.
+/// 
+/// [TaskError]: crate::TaskError
 pub struct TaskHandle<R> {
     repr: Repr<R>,
 }
 
 enum Repr<R> {
-    CancellableTask {
+    Spawned {
         task_result: internal::TaskResultReceiver<R>,
         task_canceller: Arc<dyn internal::TaskCanceller>,
-        worker_state: Arc<internal::WorkerState>,
-    },
-    ScopedNoncancellableTask {
-        task_result: internal::TaskResultReceiver<R>,
-        worker_state: Arc<internal::WorkerState>,
+        worker_status: Arc<internal::WorkerStatus>,
     },
     Unspawned(UnspawnedReason)
 }
@@ -28,35 +26,28 @@ enum UnspawnedReason {
     PrevTaskPanic {
         panic_msg: Option<Arc<String>>
     },
+    RuntimeShutdown
 }
 
 impl<R> TaskHandle<R> {
 
-    pub(crate) fn worker_task_sender_unavailable() -> Self {
-        Self { repr: Repr::Unspawned(UnspawnedReason::WorkerTaskSenderUnavailable) }
-    }
+    pub(crate) fn unspawned(reason: internal::WorkerSendError) -> Self {
+        let reason = match reason {
+            internal::WorkerSendError::PrevTaskPanic { panic_msg } => UnspawnedReason::PrevTaskPanic { panic_msg },
+            internal::WorkerSendError::RuntimeShutdown => UnspawnedReason::RuntimeShutdown,
+            internal::WorkerSendError::TaskSenderUnavailable => UnspawnedReason::WorkerTaskSenderUnavailable,
+        };
 
-    pub(crate) fn prev_task_panicked(panic_msg: Option<Arc<String>>) -> Self {
-        Self { repr: Repr::Unspawned(UnspawnedReason::PrevTaskPanic { panic_msg }) }
+        Self { repr: Repr::Unspawned(reason) }
     }
 
     pub(crate) fn new(
         task_result: internal::TaskResultReceiver<R>,
         task_canceller: Arc<dyn internal::TaskCanceller>,
-        worker_state: Arc<internal::WorkerState>,
+        worker_status: Arc<internal::WorkerStatus>,
     ) -> Self {
 
-        Self { repr: Repr::CancellableTask { task_result, task_canceller, worker_state } }
-    }
-
-    /// タスクが終了するまで Worker が abort も cancel も行われず、
-    /// また他のタスクのパニック以外でタスク自体もキャンセルされないタスクを作成する。
-    pub(crate) fn new_scoped_noncancellable(
-        task_result: internal::TaskResultReceiver<R>,
-        worker_state: Arc<internal::WorkerState>,
-    ) -> Self {
-
-        Self { repr: Repr::ScopedNoncancellableTask { task_result, worker_state } }
+        Self { repr: Repr::Spawned { task_result, task_canceller, worker_status } }
     }
 }
 
@@ -76,58 +67,53 @@ impl<R> TaskHandle<R> {
     /// use std::time::Duration;
     /// use tokio::time::sleep;
     /// 
-    /// let queue = async_sequential::TaskQueue::new(());
+    /// let worker = async_sequential::spawn_worker(());
     /// 
     /// // The task is not cancelled
     /// // when the handle cancels it while it is running.
-    /// let handle = queue.spawn(move |_| Box::pin(async move {
+    /// let task = worker.spawn(move |_| Box::pin(async move {
     ///     sleep(Duration::from_secs(2)).await;
     /// }));
     /// sleep(Duration::from_secs(1)).await;
-    /// assert!(!handle.cancel());
-    /// assert!(handle.await.is_ok());
+    /// assert!(!task.cancel());
+    /// assert!(task.await.is_ok());
     /// 
     /// // The task is cancelled
     /// // when the handle cancels it before running.
-    /// let _ = queue.spawn(move |_| Box::pin(async move {
+    /// let _ = worker.spawn(move |_| Box::pin(async move {
     ///     sleep(Duration::from_secs(1)).await;
     /// }));
-    /// let handle = queue.spawn(move |_| Box::pin(async move { }));
-    /// assert!(handle.cancel());
-    /// assert!(handle.await.unwrap_err().is_cancelled());
+    /// let task = worker.spawn(move |_| Box::pin(async move { }));
+    /// assert!(task.cancel());
+    /// assert!(task.await.unwrap_err().is_cancelled());
     /// 
     /// // The task is cancelled but `cancel` returns false
-    /// // because the TaskQueue is dropped before `cancel` is called and aborts the task.
-    /// let handle = queue.spawn(move |_| Box::pin(async move {
+    /// // because the worker is cancelled before `cancel` is called and cancels the task.
+    /// let task = worker.spawn(move |_| Box::pin(async move {
     ///     sleep(Duration::from_secs(2)).await;
     /// }));
     /// sleep(Duration::from_secs(1)).await;
-    /// drop(queue);
-    /// assert!(!handle.cancel());
-    /// assert!(handle.await.unwrap_err().is_cancelled());
+    /// worker.cancel();
+    /// assert!(!task.cancel());
+    /// assert!(task.await.unwrap_err().is_cancelled());
     /// # });
     /// # }
     /// ```
     pub fn cancel(&self) -> bool {
         match &self.repr {
-            Repr::Unspawned(_) | Repr::ScopedNoncancellableTask { .. } => false,
-            Repr::CancellableTask { task_canceller, worker_state, .. } => {
-                let f = worker_state.flags();
-                if f.has_abort_started() || f.has_cancel_started() {
-                    false
-                }
-                else {
-                    task_canceller.cancel()
-                }
+            Repr::Unspawned(_) => false,
+            Repr::Spawned { task_canceller, worker_status, .. } => {
+                Self::try_cancel(task_canceller.as_ref(), worker_status)
             },
         }
     }
 
     /// Returns a [TaskCanceller] that can be used to cancel the task.
     ///
-    /// The returned canceller has the same cancellation behavior as [cancel()](Self::cancel).
-    /// It can be used independently of this handle, allowing cancellation to be
-    /// triggered from a different task or stored separately from the handle.
+    /// The returned TaskCanceller has the same cancellation behavior as [cancel()].
+    /// It can be used independently of this handle,
+    /// allowing cancellation to be triggered from a different task
+    /// or stored separately from the handle.
     ///
     /// # Examples
     /// ```
@@ -136,38 +122,48 @@ impl<R> TaskHandle<R> {
     /// use std::time::Duration;
     /// use tokio::time::sleep;
     ///
-    /// let queue = async_sequential::TaskQueue::new(());
+    /// let worker = async_sequential::spawn_worker(());
     ///
-    /// let handle = queue.spawn(move |_| Box::pin(async move {
+    /// let task = worker.spawn(move |_| Box::pin(async move {
     ///     sleep(Duration::from_secs(1)).await;
     /// }));
     ///
-    /// let canceller = handle.canceller();
+    /// let canceller = task.canceller();
     ///
     /// assert!(canceller.cancel());
-    /// assert!(handle.await.unwrap_err().is_cancelled());
+    /// assert!(task.await.unwrap_err().is_cancelled());
     /// # });
     /// # }
     /// ```
+    /// 
+    /// [cancel()]: Self::cancel
+    /// [TaskCanceller]: crate::TaskCanceller
     pub fn canceller(&self) -> TaskCanceller {
         match &self.repr {
-            Repr::Unspawned(_) | Repr::ScopedNoncancellableTask { .. } => {
+            Repr::Unspawned(_) => {
                 TaskCanceller::noncancellable()
             },
-            Repr::CancellableTask { task_canceller, worker_state, .. } => {
+            Repr::Spawned { task_canceller, worker_status, .. } => {
                 let task_canceller = Arc::clone(task_canceller);
-                let worker_state = Arc::clone(worker_state);
+                let worker_status = Arc::clone(worker_status);
 
                 TaskCanceller::new(Arc::new(move || {
-                    let f = worker_state.flags();
-                    if f.has_abort_started() || f.has_cancel_started() {
-                        false
-                    }
-                    else {
-                        task_canceller.cancel()
-                    }
+                    Self::try_cancel(task_canceller.as_ref(), &worker_status)
                 }))
             },
+        }
+    }
+
+    fn try_cancel(
+        task_canceller: &dyn internal::TaskCanceller,
+        worker_status: &internal::WorkerStatus,
+    ) -> bool {
+
+        match worker_status.flag() {
+            internal::WorkerFlagSnapshot::AbortStarted => false,
+            internal::WorkerFlagSnapshot::CancelStarted => false,
+            internal::WorkerFlagSnapshot::TaskPanicked => false,
+            internal::WorkerFlagSnapshot::Other => task_canceller.cancel(),
         }
     }
 }
@@ -181,27 +177,34 @@ impl<R> Future for TaskHandle<R> {
     ) -> Poll<Self::Output> {
 
         match &mut self.repr {
-            Repr::CancellableTask { task_result, task_canceller, worker_state } => {
+            Repr::Spawned { task_result, task_canceller, worker_status } => {
                 match Pin::new(task_result).poll(cx) {
                     Poll::Ready(result) => {
                         match result {
                             Ok(value) => Poll::Ready(Ok(value)),
                             Err(Some(panic)) => Poll::Ready(Err(TaskError::task_panicked(panic))),
                             Err(None) => {
+                                // これはタスクのキャンセルが成功していた場合にのみ true になる。
+                                // よって、これが true の際は worke が abort や cancel　された前に
+                                // タスクがキャンセルされていたことになる。
                                 if task_canceller.is_cancelled() {
                                     return Poll::Ready(Err(TaskError::task_cancelled()))
                                 }
 
-                                let worker_flags = worker_state.flags();
-                                if worker_flags.has_cancel_started() {
-                                    Poll::Ready(Err(TaskError::worker_cancelled()))
-                                }
-                                else if worker_flags.has_abort_started() {
-                                    Poll::Ready(Err(TaskError::worker_aborted()))
-                                }
-                                else {
-                                    let panic_msg = worker_state.task_panic_msg();
-                                    Poll::Ready(Err(TaskError::prev_task_panicked(panic_msg)))
+                                match worker_status.flag() {
+                                    internal::WorkerFlagSnapshot::AbortStarted => {
+                                        Poll::Ready(Err(TaskError::worker_aborted()))
+                                    },
+                                    internal::WorkerFlagSnapshot::CancelStarted => {
+                                        Poll::Ready(Err(TaskError::worker_cancelled()))
+                                    },
+                                    internal::WorkerFlagSnapshot::TaskPanicked => {
+                                        let panic_msg = worker_status.task_panic_msg();
+                                        Poll::Ready(Err(TaskError::prev_task_panicked(panic_msg)))
+                                    },
+                                    internal::WorkerFlagSnapshot::Other => {
+                                        Poll::Ready(Err(TaskError::runtime_shutdown()))
+                                    },
                                 }
                             },
                         }
@@ -211,7 +214,7 @@ impl<R> Future for TaskHandle<R> {
                         // 後続のタスクはキャンセルされない。
                         // そのため、ここでタスクをキャンセルしないと、後続のタスクが
                         // 実行中のタスクの完了まで解決されなくなってしまう。
-                        if worker_state.flags().has_cancel_started() {
+                        if matches!(worker_status.flag(), internal::WorkerFlagSnapshot::CancelStarted) {
                             // タスクをキャンセルできなければそのタスクは実行中。
                             if task_canceller.cancel() {
                                 return Poll::Ready(Err(TaskError::worker_cancelled()));
@@ -222,31 +225,17 @@ impl<R> Future for TaskHandle<R> {
                     }
                 }
             },
-            // このタスクが実行中は Worker が abort も cancel もされず、
-            // タスクのキャンセルも行われることはない。
-            Repr::ScopedNoncancellableTask { task_result, worker_state } => {
-                match Pin::new(task_result).poll(cx) {
-                    Poll::Ready(result) => {
-                        match result {
-                            Ok(value) => Poll::Ready(Ok(value)),
-                            Err(Some(panic)) => Poll::Ready(Err(TaskError::task_panicked(panic))),
-                            Err(None) => {
-                                let panic_msg = worker_state.task_panic_msg();
-                                Poll::Ready(Err(TaskError::prev_task_panicked(panic_msg)))
-                            },
-                        }
-                    },
-                    Poll::Pending => Poll::Pending
-                }
-            },
             Repr::Unspawned(reason) => {
                 match reason {
-                    UnspawnedReason::WorkerTaskSenderUnavailable => {
-                        Poll::Ready(Err(TaskError::worker_task_sender_unavailable()))
-                    },
                     UnspawnedReason::PrevTaskPanic { panic_msg } => {
                         Poll::Ready(Err(TaskError::prev_task_panicked(panic_msg.take())))
                     }
+                    UnspawnedReason::WorkerTaskSenderUnavailable => {
+                        Poll::Ready(Err(TaskError::worker_task_sender_unavailable()))
+                    },
+                    UnspawnedReason::RuntimeShutdown => {
+                        Poll::Ready(Err(TaskError::runtime_shutdown()))
+                    },
                 }
             },
         }

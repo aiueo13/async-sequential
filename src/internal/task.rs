@@ -17,7 +17,7 @@ where
     R: Send + 'static,
 {
     let (task, result_rx) = build_async_raw_task(task);
-    build_cancellable_task(task, result_rx)
+    build_task(task, result_rx)
 }
 
 pub fn build_blocking_task<S, T, R>(
@@ -29,33 +29,8 @@ where
     R: Send + 'static,
 {
     let (task, result_rx) = build_blocking_raw_task(task);
-    build_cancellable_task(task, result_rx)
+    build_task(task, result_rx)
 }
-
-pub fn build_uncancellable_async_task<S, T, R>(
-    task: T,
-) -> (Task<S>, TaskResultReceiver<R>)
-where 
-    S: Send + 'static,
-    T: for<'a> FnOnce(&'a mut S) -> Pin<Box<dyn Future<Output = R> + Send + 'a>> + Send + 'static,
-    R: Send + 'static,
-{
-    let (task, result_rx) = build_async_raw_task(task);
-    build_uncancellable_task(task, result_rx)
-}
-
-pub fn build_uncancellable_blocking_task<S, T, R>(
-    task: T,
-) -> (Task<S>, TaskResultReceiver<R>)
-where 
-    S: Send + 'static,
-    T: (FnOnce(&mut S) -> R) + Send + 'static,
-    R: Send + 'static,
-{
-    let (task, result_rx) = build_blocking_raw_task(task);
-    build_uncancellable_task(task, result_rx)
-}
-
 
 fn build_async_raw_task<S, T, R>(
     task: T,
@@ -87,7 +62,7 @@ where
     (task, result_rx)
 }
 
-fn build_cancellable_task<S, R>(
+fn build_task<S, R>(
     task: RawTask<S>,
     result_rx: oneshot::Receiver<R>,
 ) -> (Task<S>, TaskResultReceiver<R>, Arc<dyn TaskCanceller>)
@@ -99,31 +74,12 @@ where
     let task = Arc::new(OnceTake::new((task, panic_sender)));
     let canceller = Arc::new(TaskCancellerImpl::new(Arc::downgrade(&task)));
     let result = TaskResultReceiver::new(result_rx, panic_rx);
-    (Task::new_cancellable(task), result, canceller)
-}
-
-fn build_uncancellable_task<S, R>(
-    task: RawTask<S>,
-    result_rx: oneshot::Receiver<R>,
-) -> (Task<S>, TaskResultReceiver<R>)
-where 
-    S: Send + 'static,
-{
-    let (panic_tx, panic_rx) = oneshot::channel();
-    let panic_sender = TaskPanicSender::new(panic_tx);
-    let task = (task, panic_sender);
-    let result = TaskResultReceiver::new(result_rx, panic_rx);
-    (Task::new_uncancellable(task), result)
+    (Task::new(task), result, canceller)
 }
 
 
 pub struct Task<S> {
-    repr: TaskRepr<S>,
-}
-
-enum TaskRepr<S> {
-    Uncancellable((RawTask<S>, TaskPanicSender)),
-    Cancellable(Arc<OnceTake<(RawTask<S>, TaskPanicSender)>>)
+    repr: Arc<OnceTake<(RawTask<S>, TaskPanicSender)>>,
 }
 
 pub enum RawTask<S> {
@@ -133,19 +89,12 @@ pub enum RawTask<S> {
 
 impl<S> Task<S> {
 
-    fn new_uncancellable(task: (RawTask<S>, TaskPanicSender)) -> Self {
-        Self { repr: TaskRepr::Uncancellable(task)}
+    fn new(task: Arc<OnceTake<(RawTask<S>, TaskPanicSender)>>) -> Self {
+        Self { repr: task }
     }
 
-    fn new_cancellable(task: Arc<OnceTake<(RawTask<S>, TaskPanicSender)>>) -> Self {
-        Self { repr: TaskRepr::Cancellable(task)}
-    }
-
-    pub fn take(self) -> Option<(RawTask<S>, TaskPanicSender)> {
-        match self.repr {
-            TaskRepr::Uncancellable(task) => Some(task),
-            TaskRepr::Cancellable(task) => task.take(),
-        }
+    pub fn take_if_not_cancelled(self) -> Option<(RawTask<S>, TaskPanicSender)> {
+        self.repr.take()
     }
 }
 
@@ -226,7 +175,7 @@ impl<R> Future for TaskResultReceiver<R> {
 
 pub trait TaskCanceller: Sync + Send + RefUnwindSafe + UnwindSafe + 'static {
 
-    /// すでにキャンセルされているかを返す。
+    /// 過去に self.cancel() が呼び出され、かつそれが成功しているかを示す。
     fn is_cancelled(&self) -> bool;
 
     /// タスクが実行待機中の場合はタスクをキャンセルし、 true を返す。

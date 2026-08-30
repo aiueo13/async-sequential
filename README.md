@@ -2,7 +2,7 @@ Note: **I’m using a translation tool, so some expressions may be awkward or in
 
 # Overview
 
-Run asynchronous and blocking tasks sequentially on a shared mutable state, allowing the final state to be obtained after all tasks complete.
+Provides a worker for running asynchronous and blocking tasks sequentially on shared mutable state, allowing the final state to be obtained after all tasks complete.
 
 This crate requires the `tokio` async runtime.
 
@@ -11,20 +11,21 @@ This crate requires the `tokio` async runtime.
 ```rust
 use std::{thread, time::Duration};
 use tokio::time::sleep;
-
+ 
 #[tokio::main]
 async fn main() {
-    let queue = async_sequential::TaskQueue::new(Vec::new());
+    // Spawn a worker with the given state
+    let worker = async_sequential::spawn_worker(Vec::new());
 
-    // Tasks are executed in the order in which they are spawned.
-    queue.spawn(move |state: &mut Vec<u64>| Box::pin(async move {
+    // Spawn a task onto the worker
+    worker.spawn(move |state: &mut Vec<u64>| Box::pin(async move {
         sleep(Duration::from_secs(1)).await;
         state.push(1);
     }));
 
-    // A spawner can be used to spawn tasks onto the queue
+    // A spawner can be used to spawn tasks onto the worker
     // from another thread or Tokio task.
-    let spawner = queue.spawner();
+    let spawner = worker.spawner();
     tokio::spawn(async move {
         let task_handle1 = spawner.spawn_blocking(move |state| {
             thread::sleep(Duration::from_secs(2));
@@ -36,17 +37,17 @@ async fn main() {
             state.push(3);
             "world"
         }));
-
+ 
         assert_eq!(task_handle1.await.unwrap(), "hello");
         assert_eq!(task_handle2.await.unwrap(), "world");
-
-        // Drop the spawner to allow `join()` to complete.
+ 
+        // Drop the spawner to allow the worker to complete.
         drop(spawner);
     });
 
     // Wait for all tasks to complete.
     // NOTE: This does not complete as long as any spawner remains alive.
-    let result = queue.join().await;
+    let result = worker.join().await.unwrap();
     assert_eq!(result, vec![1, 2, 3]);
 }
 ```

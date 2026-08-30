@@ -1,108 +1,153 @@
 use super::*;
-use std::{borrow::Cow, panic, sync::{Arc, Mutex as SyncMutex, OnceLock, atomic::{AtomicU8, Ordering}}};
-use tokio::{sync::mpsc, task::{AbortHandle, JoinHandle, spawn, spawn_blocking}};
+use std::{panic::{RefUnwindSafe, UnwindSafe}, sync::{Arc, Mutex as SyncMutex, OnceLock, atomic::{AtomicU8, Ordering}}};
+use tokio::{sync::{Mutex, mpsc}, task::{JoinHandle, spawn, spawn_blocking}};
 
 
-pub fn spawn_worker<S: Send + 'static>(state: S) -> WorkerHandle<S> {
+pub enum WorkerRuntime<'a> {
+    Current,
+    Handle(&'a tokio::runtime::Handle)
+}
+
+impl<'a> WorkerRuntime<'a> {
+
+    fn spawn<F>(&self, future: F) -> JoinHandle<F::Output>
+    where
+        F: Future + Send + 'static,
+        F::Output: Send + 'static,
+    {
+        match self {
+            WorkerRuntime::Current => spawn(future),
+            WorkerRuntime::Handle(handle) => handle.spawn(future),
+        }
+    }
+}
+
+pub fn spawn_worker<S: Send + 'static>(
+    state: S,
+    runtime: WorkerRuntime<'_>,
+) -> WorkerHandle<S> {
+
     let (task_tx, mut task_rx) = mpsc::unbounded_channel::<Task<S>>();
-    let worker_state = Arc::new(WorkerState::new());
-    let (panic_sender_tx, panic_sender_rx) = slot();
+    let worker_status = Arc::new(WorkerStatus::new());
 
-    // state がスタックに大きいデータを保持している場合の移動コストを削減するため、ヒープに置く
-    let mut state = Box::new(state);
+    let state = Arc::new(Mutex::new(Some(state)));
 
-    let (worker_handle, worker_join_handle) = {
-        let worker_state = Arc::clone(&worker_state);
-        let worker_join_handle = spawn(async move {
+    let worker_handle = {
+        let worker_status = Arc::clone(&worker_status);
+        let mut state = Arc::clone(&state);
+        runtime.spawn(async move {
             while let Some(task) = task_rx.recv().await {
-                if worker_state.flags().has_cancel_started() {
+                if matches!(worker_status.flag(), WorkerFlagSnapshot::CancelStarted) {
                     break;
                 }
-
-                let Some((task, panic_sender)) = task.take() else {
+                let Some((task, task_panic_sender)) = task.take_if_not_cancelled() else {
                     continue;
                 };
 
-                panic_sender_tx.set(panic_sender);
-
-                match task {
+                let result = match task {
                     RawTask::Blocking(task) => {
-                        state = spawn_blocking(move || {
-                            task(&mut *state);
-                            state
-                        }).await.unwrap_or_else(|e| panic::resume_unwind(e.into_panic()));
+                        let result = spawn_blocking(move || {
+                            let result = {
+                                if let Ok(mut state) = state.try_lock() {
+                                    if let Some(state) = state.as_mut() {
+                                        catch_unwind(|| task(state))
+                                    }
+                                    else {
+                                        // join により state が取られている。
+                                        // この場合 tokio runtime がシャットダウンか abort されている。
+                                        return None
+                                    }
+                                }
+                                else {
+                                    // 即座に lock を取得できない場合、
+                                    // join と競合したということであり
+                                    // この場合 tokio runtime がシャットダウンか abort されている。
+                                    return None
+                                }
+                            };
+                            Some((state, result))
+                        }).await;
+                        match result {
+                            Ok(Some((s, result))) => {
+                                state = s;
+                                result
+                            },
+                            Ok(None) | Err(_) => {
+                                // tokio runtime がシャットダウンか abort された場合、ここに来る可能性がある
+                                return Err(())
+                            },
+                        }
                     },
-                    RawTask::Async(task) => task(&mut *state).await,
+                    RawTask::Async(task) => {
+                        if let Ok(mut state) = state.try_lock() {
+                            if let Some(state) = state.as_mut() {
+                                catch_unwind_async(|| task(state)).await
+                            }
+                            else {
+                                // join により state が取られている。
+                                // この場合 tokio runtime がシャットダウンか abort されている。
+                                return Err(())
+                            }
+                        }
+                        else {
+                            // 即座に lock を取得できない場合、
+                            // join と競合したということであり
+                            // この場合 tokio runtime がシャットダウンか abort されている。
+                            return Err(())
+                        }
+                    },
+                };
+
+                if let Err(panic) = result {
+                    let panic_msg = panic.msg().map(|m| Arc::new(m.to_string()));
+                    worker_status.set_task_panicked(panic_msg);
+                    task_panic_sender.send(panic);
+                    return Err(())
                 }
             }
-            state
-        });
-        (worker_join_handle.abort_handle(), worker_join_handle)
-    };
-
-    let join_handle = {
-        let worker_state = Arc::clone(&worker_state);
-        spawn(async move {
-            match worker_join_handle.await {
-                Ok(state) => Ok(state),
-                Err(e) => {
-                    if let Some(panic) = e.try_into_panic().ok() {
-                        let panic = PanicPayload::new(panic);
-                        let task_panic_msg = panic.msg().map(|s| s.to_string());
-                        if let Some(panic_sender) = panic_sender_rx.take() { 
-                            panic_sender.send(panic);
-                        }
-
-                        let _ = worker_state.set_task_panic_msg(
-                            task_panic_msg.as_ref().map(Clone::clone).map(Arc::new)
-                        );
-                        
-                        return match task_panic_msg {
-                            Some(task_panic_msg) => Err(WorkerJoinError::with_msg(task_panic_msg)),
-                            None => Err(WorkerJoinError::with_no_msg()),
-                        }
-                    }
-
-                    // cancel は worker を中断させないため、原因は abort に限られる。
-                    // ただし、abort は join を提供しないのでこのメッセージが使われることはない。
-                    Err(WorkerJoinError::with_msg("worker aborted"))
-                },
-            }
+            Ok(())
         })
     };
 
-    WorkerHandle::new(worker_handle, join_handle, worker_state, task_tx)
+    WorkerHandle::new(state, worker_handle, worker_status, task_tx)
 }
 
 pub struct WorkerHandle<S> {
-    worker_handle: AbortHandle,
-    join_handle: JoinHandle<Result<Box<S>, WorkerJoinError>>,
-    worker_state: Arc<WorkerState>,
+    worker_handle: JoinHandle<Result<(), ()>>,
+    worker_status: Arc<WorkerStatus>,
+    state: Arc<Mutex<Option<S>>>,
     task_tx: mpsc::UnboundedSender<Task<S>>,
     shared_task_senders_ctx: Arc<SyncMutex<Option<WorkerTaskSenderCtx<S>>>>,
 }
 
+impl<S: UnwindSafe> UnwindSafe for WorkerHandle<S> {}
+impl<S: RefUnwindSafe> RefUnwindSafe for WorkerHandle<S> {}
+
 impl<S> WorkerHandle<S> {
 
     fn new(
-        worker_handle: AbortHandle,
-        join_handle: JoinHandle<Result<Box<S>, WorkerJoinError>>,
-        worker_state: Arc<WorkerState>,
+        state: Arc<Mutex<Option<S>>>,
+        worker_handle: JoinHandle<Result<(), ()>>,
+        worker_status: Arc<WorkerStatus>,
         task_tx: mpsc::UnboundedSender<Task<S>>,
     ) -> Self {
 
         let shared_task_senders_ctx = Arc::new(SyncMutex::new(Some(WorkerTaskSenderCtx {
             task_tx: task_tx.clone(),
-            worker_handle: worker_handle.clone()
+            worker_status: Arc::clone(&worker_status)
         })));
 
-        Self { worker_handle, join_handle, worker_state, task_tx, shared_task_senders_ctx }
+        Self { state, worker_handle, worker_status, task_tx, shared_task_senders_ctx }
     }
 
     pub fn abort(mut self) {
+        // worker_status では Tokio runtime のシャットダウンを検知できないので
+        // JoinHandle::is_finished で確認する。
+        // 競合もあり得るが、これは許容する。
         if !self.worker_handle.is_finished() {
-            self.worker_state.set_abort_started();
-            self.worker_handle.abort();
+            if self.worker_status.try_set_abort_started() {
+                self.worker_handle.abort();
+            }
         }
 
         // 全ての task_tx を破棄する。
@@ -112,8 +157,11 @@ impl<S> WorkerHandle<S> {
     }
 
     pub fn cancel(mut self) {
+        // worker_status では Tokio runtime のシャットダウンを検知できないので
+        // JoinHandle::is_finished で確認する。
+        // 競合もあり得るが、これは許容する。
         if !self.worker_handle.is_finished() {
-            self.worker_state.set_cancel_started();
+            self.worker_status.try_set_cancel_started();
         }
 
         // 全ての task_tx を破棄する。
@@ -122,9 +170,14 @@ impl<S> WorkerHandle<S> {
         drop(self.task_tx);
     }
     
-    pub async fn cancel_and_join(mut self) -> Result<S, WorkerJoinError> {
+    pub async fn abort_and_join(mut self) -> WorkerJoinError<S> {
+        // worker_status では Tokio runtime のシャットダウンを検知できないので
+        // JoinHandle::is_finished で確認する。
+        // 競合もあり得るが、これは許容する。
         if !self.worker_handle.is_finished() {
-            self.worker_state.set_cancel_started();
+            if self.worker_status.try_set_abort_started() {
+                self.worker_handle.abort();
+            }
         }
 
         // 全ての task_tx を破棄する。
@@ -132,42 +185,77 @@ impl<S> WorkerHandle<S> {
         drop(self.shared_task_senders_ctx);
         drop(self.task_tx);
 
-        match self.join_handle.await {
-            Ok(Ok(state)) => Ok(*state),
-            Ok(Err(e)) => Err(e),
-            Err(e) => {
-                let panic = e.try_into_panic().ok().map(PanicPayload::new);
-                if let Some(msg) = panic.as_ref().and_then(|panic| panic.msg()) {
-                    Err(WorkerJoinError::with_msg(format!("join worker failed: {msg}")))
-                }
-                else {
-                    Err(WorkerJoinError::with_msg("join worker failed"))
-                }
-            }
+        let result = Self::join_worker(self.worker_handle, self.state, self.worker_status).await;
+        match result {
+            Ok(state) => WorkerJoinError::WorkerAborted { poisoned_state: state },
+            Err(err) => err,
         }
     }
 
-    pub async fn join(self) -> Result<S, WorkerJoinError> {
+    pub async fn cancel_and_join(mut self) -> Result<S, WorkerJoinError<S>> {
+        // worker_status では Tokio runtime のシャットダウンを検知できないので
+        // JoinHandle::is_finished で確認する。
+        // 競合もあり得るが、これは許容する。
+        if !self.worker_handle.is_finished() {
+            self.worker_status.try_set_cancel_started();
+        }
+
+        // 全ての task_tx を破棄する。
+        self.close_senders();
+        drop(self.shared_task_senders_ctx);
+        drop(self.task_tx);
+
+        Self::join_worker(self.worker_handle, self.state, self.worker_status).await
+    }
+
+    pub async fn join(self) -> Result<S, WorkerJoinError<S>> {
         // WorkerHandleが持っている全ての task_tx を破棄し、
         // 全ての WorkerTaskSender が破棄された時点で join が終わるようにする。
         drop(self.shared_task_senders_ctx);
         drop(self.task_tx);
 
-        match self.join_handle.await {
-            Ok(Ok(state)) => Ok(*state),
-            Ok(Err(e)) => Err(e),
-            Err(e) => {
-                let panic = e.try_into_panic().ok().map(PanicPayload::new);
-                if let Some(msg) = panic.as_ref().and_then(|panic| panic.msg()) {
-                    Err(WorkerJoinError::with_msg(format!("join worker failed: {msg}")))
+        Self::join_worker(self.worker_handle, self.state, self.worker_status).await
+    }
+
+    async fn join_worker(
+        worker_handle: JoinHandle<Result<(), ()>>,
+        state: Arc<Mutex<Option<S>>>,
+        worker_status: Arc<WorkerStatus>
+    ) -> Result<S, WorkerJoinError<S>> {
+
+        let worker_result = worker_handle.await;
+
+        // worker task は終了したが、
+        // 内部のブロッキングタスクがまだ実行中である場合はそれが終わるまでここで待機する。
+        let state = state.lock().await.take().expect("state should be exist");
+
+        match worker_result {
+            Ok(Ok(())) => Ok(state),
+            Ok(Err(())) => {
+                let poisoned_state = state;
+                match worker_status.flag() {
+                    WorkerFlagSnapshot::AbortStarted => {
+                        Err(WorkerJoinError::WorkerAborted { poisoned_state })
+                    },
+                    WorkerFlagSnapshot::TaskPanicked => {
+                        let panic_msg = worker_status.task_panic_msg();
+                        Err(WorkerJoinError::AnyTaskPanic { panic_msg, poisoned_state })
+                    },
+                    // キャンセルは正常終了させるのでここに来た場合は tokio runtime がシャットダウンされたということ。
+                    WorkerFlagSnapshot::Other | WorkerFlagSnapshot::CancelStarted => {
+                        Err(WorkerJoinError::RuntimeShutdown { poisoned_state }) 
+                    },
                 }
-                else {
-                    Err(WorkerJoinError::with_msg("join worker failed"))
-                }
+            }
+            Err(_) => {
+                let poisoned_state = state;
+                Err(WorkerJoinError::RuntimeShutdown { poisoned_state }) 
             }
         }
     }
 
+    /// 既存の sender を全て close する。
+    /// 今後生成される sender には影響しない。
     pub fn close_senders(&mut self) {
         // 既存の全ての WorkerTaskSender が保持する ctx を削除する。
         let ctx = self.shared_task_senders_ctx.lock().unwrap_or_else(|e| e.into_inner()).take();
@@ -175,27 +263,30 @@ impl<S> WorkerHandle<S> {
     }
 
     pub fn has_panicked(&self) -> bool {
-        if self.worker_handle.is_finished() {
-            let f = self.worker_state.flags();
-            !f.has_abort_started() && !f.has_cancel_started()
-        }
-        else {
-            false
-        }
+        matches!(self.worker_status.flag(), WorkerFlagSnapshot::TaskPanicked)
     }
 
     pub fn sender(&self) -> WorkerTaskSender<S> {
-        WorkerTaskSender::new(&self.shared_task_senders_ctx, &self.worker_state)
+        WorkerTaskSender::new(Arc::clone(&self.shared_task_senders_ctx))
     }
 
-    pub fn send(&self, task: Task<S>) -> Result<Arc<WorkerState>, WorkerSendError> {
+    pub fn send(&self, task: Task<S>) -> Result<Arc<WorkerStatus>, WorkerSendError> {
         match self.task_tx.send(task) {
-            Ok(_) => Ok(Arc::clone(&self.worker_state)),
+            Ok(_) => Ok(Arc::clone(&self.worker_status)),
             Err(_) => {
-                // abort と cancel は self を取るので、
-                // send　の失敗の原因は過去のタスクのパニックに絞られる。
-                let panic_msg = self.worker_state.task_panic_msg();
-                Err(WorkerSendError::PrevTaskPanic { panic_msg })
+                match self.worker_status.flag() {
+                    WorkerFlagSnapshot::TaskPanicked => {
+                        let panic_msg = self.worker_status.task_panic_msg();
+                        Err(WorkerSendError::PrevTaskPanic { panic_msg })
+                    },
+                    WorkerFlagSnapshot::Other => {
+                        Err(WorkerSendError::RuntimeShutdown)
+                    },
+                    // abort や cancel は self を取るのでここに来ない。
+                    WorkerFlagSnapshot::AbortStarted | WorkerFlagSnapshot::CancelStarted => {
+                        unreachable!()
+                    },
+                }
             },
         }
     }
@@ -203,187 +294,162 @@ impl<S> WorkerHandle<S> {
 
 struct WorkerTaskSenderCtx<S> {
     task_tx: mpsc::UnboundedSender<Task<S>>,
-    worker_handle: AbortHandle,
+    worker_status: Arc<WorkerStatus>,
 }
 
 pub struct WorkerTaskSender<S> {
-    ctx: SyncMutex<Option<Arc<SyncMutex<Option<WorkerTaskSenderCtx<S>>>>>>,
-    worker_state: Arc<WorkerState>,
+    shared_ctx: Arc<SyncMutex<Option<WorkerTaskSenderCtx<S>>>>,
 }
 
 impl<S> WorkerTaskSender<S> {
 
-    fn new(
-        shared_ctx: &Arc<SyncMutex<Option<WorkerTaskSenderCtx<S>>>>,
-        worker_state: &Arc<WorkerState>,
-    ) -> Self {
-
-        Self {
-            ctx: SyncMutex::new(Some(Arc::clone(&shared_ctx))),
-            worker_state: Arc::clone(&worker_state)
-        }
+    fn new(shared_ctx: Arc<SyncMutex<Option<WorkerTaskSenderCtx<S>>>>) -> Self {
+        Self { shared_ctx }
     }
 
     pub fn is_unavailable(&self) -> bool {
-        let locked_ctx = self.ctx.lock().unwrap_or_else(|e| e.into_inner());
-        let Some(ctx) = locked_ctx.as_ref() else {
-            return false;
-        };
-        let locked_shared_ctx = ctx.lock().unwrap_or_else(|e| e.into_inner());
-        locked_shared_ctx.is_none()
+        let locked_ctx = self.shared_ctx.lock().unwrap_or_else(|e| e.into_inner());
+        locked_ctx.is_none()
     }
 
     pub fn has_panicked(&self) -> Option<bool> {
-        let locked_ctx = self.ctx.lock().unwrap_or_else(|e| e.into_inner());
+        let locked_ctx = self.shared_ctx.lock().unwrap_or_else(|e| e.into_inner());
         let Some(ctx) = locked_ctx.as_ref() else {
             return None;
         };
-        let locked_shared_ctx = ctx.lock().unwrap_or_else(|e| e.into_inner());
-        let Some(shared_ctx) = locked_shared_ctx.as_ref() else {
-            return None;
-        };
 
-        if shared_ctx.worker_handle.is_finished() {
-            let f = self.worker_state.flags();
-            let is_prev_task_panic = !f.has_abort_started() && !f.has_cancel_started();
-            Some(is_prev_task_panic)
+        match ctx.worker_status.flag() {
+            WorkerFlagSnapshot::AbortStarted => None,
+            WorkerFlagSnapshot::CancelStarted => None,
+            WorkerFlagSnapshot::TaskPanicked => Some(true),
+            WorkerFlagSnapshot::Other => Some(false),
         }
-        else {
-            Some(false)
-        }
-    }
-
-    pub fn close(&self) {
-        let mut locked_ctx = self.ctx.lock().unwrap_or_else(|e| e.into_inner());
-        *locked_ctx = None;
     }
 }
 
 impl<S: Send + 'static> WorkerTaskSender<S> {
 
-    pub fn send(&self, task: Task<S>) -> Result<Arc<WorkerState>, WorkerTaskSenderSendError> {
-        let result = {
-            let locked_ctx = self.ctx.lock().unwrap_or_else(|e| e.into_inner());
+    pub fn send(&self, task: Task<S>) -> Result<Arc<WorkerStatus>, WorkerSendError> {
+        let (result, worker_status) = {
+            let locked_ctx = self.shared_ctx.lock().unwrap_or_else(|e| e.into_inner());
             let Some(ctx) = locked_ctx.as_ref() else {
-                return Err(WorkerTaskSenderSendError::Unavailable)
+                return Err(WorkerSendError::TaskSenderUnavailable)
             };
-            let locked_shared_ctx = ctx.lock().unwrap_or_else(|e| e.into_inner());
-            let Some(ref shared_ctx) = *locked_shared_ctx else {
-                return Err(WorkerTaskSenderSendError::Unavailable)
-            };
-            shared_ctx.task_tx.send(task)
+            let worker_status = Arc::clone(&ctx.worker_status);
+            let result = ctx.task_tx.send(task);
+            (result, worker_status)
         };
         
         match result {
-            Ok(_) => Ok(Arc::clone(&self.worker_state)),
+            Ok(_) => Ok(worker_status),
             Err(_) => {
-                let worker_flags = self.worker_state.flags();
-                if worker_flags.has_abort_started() || worker_flags.has_cancel_started() {
-                    Err(WorkerTaskSenderSendError::Unavailable)
-                }
-                else {
-                    let panic_msg = self.worker_state.task_panic_msg();
-                    Err(WorkerTaskSenderSendError::PrevTaskPanic { panic_msg })
+                match worker_status.flag() {
+                    WorkerFlagSnapshot::AbortStarted |
+                    WorkerFlagSnapshot::CancelStarted => {
+                        Err(WorkerSendError::TaskSenderUnavailable)
+                    },
+                    WorkerFlagSnapshot::TaskPanicked => {
+                        let panic_msg = worker_status.task_panic_msg();
+                        Err(WorkerSendError::PrevTaskPanic { panic_msg })
+                    },
+                    WorkerFlagSnapshot::Other => {
+                        Err(WorkerSendError::RuntimeShutdown)
+                    },
                 }
             },
         }
     }
 }
 
-pub struct WorkerState {
+pub struct WorkerStatus {
     flags: AtomicU8,
     task_panic_msg: OnceLock<Option<Arc<String>>>,
 }
 
-impl WorkerState {
+impl WorkerStatus {
+
+    fn new() -> Self {
+        Self {
+            flags: AtomicU8::new(Self::FLAG_OTHER),
+            task_panic_msg: OnceLock::new(),
+        }
+    }
     
     /// タスクがパニックしてワーカーが終了し、かつそのパニックのメッセージがあればそれを取得する。
-    /// これが None でもタスクがパニックしてワーカーが終了していることがあることに注意。
+    /// flag() == WorkerFlagSnapshot::TaskPanicked を確認した後であれば、
+    /// パニックのメッセージがあればそれを必ず取得できる。
+    /// ただし、パニックのメッセージがない場合は None になることに注意
     pub fn task_panic_msg(&self) -> Option<Arc<String>> {
         self.task_panic_msg.get().and_then(|s| s.as_ref().map(Arc::clone))
     }
 
-    pub fn flags(&self) -> WorkerFlagsSnapshot {
-        WorkerFlagsSnapshot {
-            flags: self.get_flags(),
-        }
-    }
-}
-
-impl WorkerState {
-
-    fn new() -> Self {
-        Self {
-            flags: AtomicU8::new(0),
-            task_panic_msg: OnceLock::new(),
+    pub fn flag(&self) -> WorkerFlagSnapshot {
+        let flags = self.flags.load(Ordering::Acquire);
+        match flags {
+            Self::FLAG_OTHER => WorkerFlagSnapshot::Other,
+            Self::FLAG_ABORT_STARTED => WorkerFlagSnapshot::AbortStarted,
+            Self::FLAG_CANCEL_STARTED => WorkerFlagSnapshot::CancelStarted,
+            Self::FLAG_TASK_PANICKED => WorkerFlagSnapshot::TaskPanicked,
+            _ => unreachable!("WorkerStatus flags corrupted: {flags:#010b}"),
         }
     }
 
-    fn set_abort_started(&self) {
-        self.set_flag(Self::FLAG_ABORT_STARTED);
+    /// このメソッドが呼ばれた時点で cancel/panic 済みなら設定しない。
+    fn try_set_abort_started(&self) -> bool {
+        self.flags
+            .compare_exchange(
+                Self::FLAG_OTHER,
+                Self::FLAG_ABORT_STARTED,
+                Ordering::Release,
+                Ordering::Acquire,
+            )
+            .is_ok()
     }
 
-    fn set_cancel_started(&self) {
-        self.set_flag(Self::FLAG_CANCEL_STARTED);
+    /// このメソッドが呼ばれた時点で abort/panic 済みなら設定しない。
+    fn try_set_cancel_started(&self) -> bool {
+        self.flags
+            .compare_exchange(
+                Self::FLAG_OTHER,
+                Self::FLAG_CANCEL_STARTED,
+                Ordering::Release,
+                Ordering::Acquire,
+            )
+            .is_ok()
     }
 
-    /// 既にセットされている場合はセットせず与えられた値をそのまま返す
-    fn set_task_panic_msg(
-        &self,
-        msg: Option<Arc<String>>
-    ) -> Result<(), Option<Arc<String>>> {
-
-        self.task_panic_msg.set(msg)
+    /// このメソッドが呼ばれた時点で abort/cancel 済みならそれを上書きする。
+    /// すでに panic 済みであれば msg は設定しないが、
+    /// このメソッドが複数回同時に呼ばれた場合、どれを使うかは問わない。
+    fn set_task_panicked(&self, msg: Option<Arc<String>>) {
+        // 先に panic msg を設定し、panicked であれば必ず panic msg があるようにする。
+        let _ = self.task_panic_msg.set(msg);
+        self.flags.store(Self::FLAG_TASK_PANICKED, Ordering::Release);
     }
 
-
+    const FLAG_OTHER: u8 = 0b0000_0000;
     const FLAG_ABORT_STARTED: u8 = 0b0000_0001;
     const FLAG_CANCEL_STARTED: u8 = 0b0000_0010;
-
-    fn set_flag(&self, flag: u8) {
-        self.flags.fetch_or(flag, Ordering::Release);
-    }
-
-    fn get_flags(&self) -> u8 {
-        self.flags.load(Ordering::Acquire)
-    }
+    const FLAG_TASK_PANICKED: u8 = 0b0000_0100;
 }
 
-pub struct WorkerFlagsSnapshot {
-    flags: u8,
+pub enum WorkerFlagSnapshot {
+    AbortStarted,
+    CancelStarted,
+    TaskPanicked,
+    Other,
 }
 
-impl WorkerFlagsSnapshot {
-    
-    pub fn has_abort_started(&self) -> bool {
-        self.flags & WorkerState::FLAG_ABORT_STARTED != 0
-    }
-
-    pub fn has_cancel_started(&self) -> bool {
-        self.flags & WorkerState::FLAG_CANCEL_STARTED != 0
-    }
-}
-
-pub struct WorkerJoinError {
-    panic_msg: Option<Cow<'static, str>>
-}
-
-impl WorkerJoinError {
-
-    pub(super) fn with_msg(panic_msg: impl Into<Cow<'static, str>>) -> Self {
-        Self { panic_msg: Some(panic_msg.into()) }
-    }
-
-    pub(super) fn with_no_msg() -> Self {
-        Self { panic_msg: None }
-    }
-
-    pub fn into_panic_msg(self) -> Option<Cow<'static, str>> {
-        self.panic_msg
-    }
-
-    pub fn panic_msg(&self) -> Option<&str> {
-        self.panic_msg.as_deref()
+pub enum WorkerJoinError<S> {
+    AnyTaskPanic {
+        panic_msg: Option<Arc<String>>,
+        poisoned_state: S
+    },
+    RuntimeShutdown {
+        poisoned_state: S
+    },
+    WorkerAborted {
+        poisoned_state: S
     }
 }
 
@@ -391,11 +457,6 @@ pub enum WorkerSendError {
     PrevTaskPanic {
         panic_msg: Option<Arc<String>>,
     },
-}
-
-pub enum WorkerTaskSenderSendError {
-    PrevTaskPanic {
-        panic_msg: Option<Arc<String>>,
-    },
-    Unavailable,
+    RuntimeShutdown,
+    TaskSenderUnavailable,
 }

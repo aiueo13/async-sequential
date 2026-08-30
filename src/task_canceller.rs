@@ -58,14 +58,13 @@ impl TaskCanceller {
 #[cfg(test)]
 mod tests {
     use std::panic::{RefUnwindSafe, UnwindSafe};
-    use crate::*;
 
     fn require_send_static_unpin_unwindsafe<F: Send + 'static + Unpin + UnwindSafe + RefUnwindSafe>(_: F) {}
 
     #[allow(unused)]
     fn assert_cannceller_impl_refunwindsafe_unwindsafe() {
-        let queue = TaskQueue::new(());
-        let task_handle = queue.spawn(|_| Box::pin(async {}));
+        let worker = crate::spawn_worker(());
+        let task_handle = worker.spawn(|_| Box::pin(async {}));
         let task_canceller = task_handle.canceller();
         require_send_static_unpin_unwindsafe(task_canceller);
     }
